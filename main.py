@@ -74,15 +74,11 @@ async def tawsiya(update: Update, context: ContextTypes.DEFAULT_TYPE):
     closes = [float(c[4]) for c in data]
     highs = [float(c[2]) for c in data]
     lows = [float(c[3]) for c in data]
-
     e50 = ema(closes, 50)
     e200 = ema(closes, 200)
     rsi_val = rsi(closes, 14)
-
     last_14 = data[-14:]
     atr = sum([float(x[2])-float(x[3]) for x in last_14]) / 14
-
-    # تحديد قوة الإشارة
     if closes[-1] > e50 and closes[-1] > e200 and rsi_val > 55:
         signal = "🟢 شراء قوي جداً BUY STRONG"
         sl = spot - atr*1.5
@@ -95,7 +91,7 @@ async def tawsiya(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tp1 = spot + atr*1.0
         tp2 = spot + atr*2.0
         quwa = "80%"
-    elif    closes[-1] < e50 and closes[-1] < e200 and rsi_val < 45:
+    elif closes[-1] < e50 and closes[-1] < e200 and rsi_val < 45:
         signal = "🔴 بيع قوي جداً SELL STRONG"
         sl = spot + atr*1.5
         tp1 = spot - atr*1.2
@@ -107,8 +103,7 @@ async def tawsiya(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tp1 = spot - atr*1.0
         tp2 = spot - atr*2.0
         quwa = "80%"
-
-    msg = f"🔥 توصية الذهب XAU/USD - نسخة كاملة\n{signal}\n\n💵 الدخول: {spot:.2f}\n🛑 وقف الخسارة: {sl:.2f}\n🎯 هدف أول: {tp1:.2f}\n🎯 هدف تاني: {tp2:.2f}\n\n📊 التفاصيل:\nالسعر اللحظي: {spot:.2f}\nEMA50: {e50:.2f}\nEMA200: {e200:.2f}\nRSI(14): {rsi_val:.1f}\nATR: {atr:.2f}\nقوة الإشارة: {quwa}\nالفريم: 1 ساعة + 4 ساعات\n\n⚠️ إدارة رأس مال 2%"
+    msg = f"🔥 توصية الذهب XAU/USD - نسخة كاملة\n{signal}\n\n💵 الدخول: {spot:.2f}\n🛑 وقف الخسارة: {sl:.2f}\n🎯 هدف أول: {tp1:.2f}\n🎯 هدف تاني: {tp2:.2f}\n\n📊 التفاصيل:\nالسعر: {spot:.2f}\nEMA50: {e50:.2f}\nEMA200: {e200:.2f}\nRSI: {rsi_val:.1f}\nATR: {atr:.2f}\nقوة الإشارة: {quwa}\nالفريم: 1 ساعة\n\n⚠️ إدارة رأس مال 2%"
     await update.message.reply_text(msg)
 
 if __name__ == "__main__":
