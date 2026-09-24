@@ -31,54 +31,52 @@ def get_candles():
     for url in urls:
         try:
             r = requests.get(url, timeout=15, headers={"User-Agent":"Mozilla/5.0"}).json()
-            if isinstance(r, list) and len(r) > 50: return r
-        except: continue
+            if isinstance(r, list) and len(r) > 50:
+                return r
+        except:
+            continue
     return []
 
 def ema(prices, period):
     k = 2 / (period + 1)
     e = sum(prices[:period]) / period
-    for p in prices[period:]: e = p*k + e*(1-k)
+    for p in prices[period:]:
+        e = p*k + e*(1-k)
     return e
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("أهلاً سليم! 👋\n/gold - سعر الذهب\n/tawsiya - توصية بالسعر الحقيقي")
+    await update.message.reply_text("أهلاً سليم! 👋\n/gold - سعر الذهب\n/tawsiya - توصية بهدفين")
 
 async def gold(update: Update, context: ContextTypes.DEFAULT_TYPE):
     price = get_spot_price()
     if price:
-        gram24 = price / 31.1035
-        await update.message.reply_text(f"💰 أونصة الذهب: ${price:.2f}\nغرام 24: ${gram24:.2f}")
+        await update.message.reply_text(f"💰 الذهب: ${price:.2f}")
     else:
-        await update.message.reply_text("خطأ جلب السعر")
+        await update.message.reply_text("خطأ")
 
 async def tawsiya(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("⏳ جاري تحليل الذهب...")
+    await update.message.reply_text("⏳ احلل...")
     data = get_candles()
     spot = get_spot_price()
     if len(data) < 60 or not spot:
         await update.message.reply_text("جرب بعد دقيقة")
         return
-
     closes = [float(c[4]) for c in data]
-    price_entry = spot # السعر الحقيقي 4283
     e50 = ema(closes, 50)
     e200 = ema(closes, 200)
     last_14 = data[-14:]
     atr = sum([float(x[2])-float(x[3]) for x in last_14]) / 14
-
     if closes[-1] > e50:
-        signal = "🟢 شراء قوي BUY"
-        sl = price_entry - atr*1.5
-        tp1 = price_entry + atr*1.0
-        tp2 = price_entry + atr*2.0
+        signal = "🟢 شراء BUY"
+        sl = spot - atr*1.5
+        tp1 = spot + atr*1.0
+        tp2 = spot + atr*2.0
     else:
-        signal = "🔴 بيع قوي SELL"
-        sl = price_entry + atr*1.5
-        tp1 = price_entry - atr*1.0
-        tp2 = price_entry - atr*2.0
-
-    msg = f"🔥 توصية الذهب XAU/USD\n{signal}\n\n💵 الدخول (سعر لحظي): {price_entry:.2f}\n🛑 وقف الخسارة: {sl:.2f}\n🎯 هدف 1: {tp1:.2f}\n🎯 هدف 2: {tp2:.2f}\n\n📊 السعر: {price_entry:.2f}\nEMA50: {e50:.2f}\nEMA200: {e200:.2f}\nالفريم: 1 ساعة"
+        signal = "🔴 بيع SELL"
+        sl = spot + atr*1.5
+        tp1 = spot - atr*1.0
+        tp2 = spot - atr*2.0
+    msg = f"🔥 الذهب XAU/USD\n{signal}\n\n💵 الدخول: {spot:.2f}\n🛑 وقف الخسارة: {sl:.2f}\n🎯 هدف أول: {tp1:.2f}\n🎯 هدف تاني: {tp2:.2f}\n\nEMA50: {e50:.2f}\nEMA200: {e200:.2f}"
     await update.message.reply_text(msg)
 
 if __name__ == "__main__":
