@@ -6,15 +6,12 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 app = Flask(__name__)
-
 @app.route('/')
-def home():
-    return "Bot is Live"
+def home(): return "Bot is Live"
 
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port, threaded=True, use_reloader=False)
-
 threading.Thread(target=run_flask, daemon=True).start()
 
 TOKEN = os.environ.get("BOT_TOKEN")
@@ -28,50 +25,72 @@ def get_candles():
         try:
             r = requests.get(url, timeout=15, headers={"User-Agent":"Mozilla/5.0"}).json()
             if isinstance(r, list) and len(r) > 50:
-                return [float(c[4]) for c in r]
-        except:
-            continue
+                return r
+        except: continue
     return []
 
 def ema(prices, period):
     k = 2 / (period + 1)
     e = sum(prices[:period]) / period
-    for price in prices[period:]:
-        e = price * k + e * (1 - k)
+    for p in prices[period:]: e = p*k + e*(1-k)
     return e
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("أهلاً سليم! 👋\nأرسل /gold لمعرفة سعر الذهب الحالي 💰\nأرسل /tawsiya للتحليل")
+    await update.message.reply_text("أهلاً سليم! 👋\n/gold سعر الذهب\n/tawsiya توصية كاملة بهدف وستوب")
 
 async def gold(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         r = requests.get("https://api.gold-api.com/price/XAU", timeout=10).json()
         price = float(r['price'])
         gram24 = price / 31.1035
-        await update.message.reply_text(f"💰 سعر أونصة الذهب الآن:\n${price:.2f}\n\nسعر الغرام عيار 24: ${gram24:.2f}")
-    except Exception as e:
-        await update.message.reply_text("خطأ جلب السعر، جرب بعد ثانية")
+        await update.message.reply_text(f"💰 أونصة الذهب: ${price:.2f}\nغرام 24: ${gram24:.2f}")
+    except:
+        await update.message.reply_text("خطأ جلب السعر")
 
 async def tawsiya(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ احلل الذهب...")
-    prices = get_candles()
-    if len(prices) < 60:
-        await update.message.reply_text("جرب بعد دقيقة، السيرفر مشغول")
+    data = get_candles()
+    if len(data) < 60:
+        await update.message.reply_text("جرب بعد دقيقة")
         return
-    price = prices[-1]
-    e50 = ema(prices, 50)
-    e200 = ema(prices, 200)
+    closes = [float(c[4]) for c in data]
+    highs = [float(c[2]) for c in data]
+    lows = [float(c[3]) for c in data]
+    price = closes[-1]
+    e50 = ema(closes, 50)
+    e200 = ema(closes, 200)
 
-    if price > e50 and e50 > e200:
-        signal = "🟢 شراء قوي BUY"
-    elif price > e50:
+    # حساب الستوب والهدف بناء على ATR بسيط
+    last_14 = data[-14:]
+    atr = sum([h-l for h,l in zip([float(x[2]) for x in last_14], [float(x[3]) for x in last_14])]) / 14
+
+    if price > e50:
         signal = "🟢 شراء BUY"
-    elif price < e50 and e50 < e200:
-        signal = "🔴 بيع قوي SELL"
+        sl = price - atr*1.5
+        tp1 = price + atr*1.0
+        tp2 = price + atr*2.0
+        entry = price
     else:
         signal = "🔴 بيع SELL"
+        sl = price + atr*1.5
+        tp1 = price - atr*1.0
+        tp2 = price - atr*2.0
+        entry = price
 
-    await update.message.reply_text(f"تحليل الذهب XAU/USD:\n{signal}\n\nالسعر الحالي: {price:.2f}\nEMA50: {e50:.2f}\nEMA200: {e200:.2f}\n\nالفريم: 1 ساعة")
+    msg = f"""🔥 توصية الذهب XAU/USD
+{signal}
+
+💵 الدخول: {entry:.2f}
+🛑 وقف الخسارة: {sl:.2f} ({abs(entry-sl):.2f}$)
+🎯 هدف 1: {tp1:.2f} ({abs(tp1-entry):.2f}$)
+🎯 هدف 2: {tp2:.2f} ({abs(tp2-entry):.2f}$)
+
+📊 السعر الحالي: {price:.2f}
+EMA50: {e50:.2f}
+EMA200: {e200:.2f}
+الفريم: 1 ساعة
+"""
+    await update.message.reply_text(msg)
 
 if __name__ == "__main__":
     print("Starting bot...")
