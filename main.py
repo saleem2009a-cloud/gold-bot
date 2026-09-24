@@ -7,7 +7,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 
 app = Flask(__name__)
 @app.route('/')
-def home(): return "Gold Entry Timing Bot"
+def home(): return "Gold Exact Entry Bot"
 
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
@@ -44,113 +44,114 @@ def rsi(prices, period=14):
     return 100-(100/(1+g/l))
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🔥 بوت دخول ذكي\n/qawi - قوة + ايمتا تدخل\n/saree3 - سريع\n/gold - سعر")
+    await update.message.reply_text("/qawi - بيعطيك نقطة دخول بالضبط\nمثال: اذا وصل 4325.50 ادخل")
 
 async def gold(update: Update, context: ContextTypes.DEFAULT_TYPE):
     p=get_spot(); await update.message.reply_text(f"💰 {p:.2f}$" if p else "خطأ")
 
-async def tawsiya(update: Update, context: ContextTypes.DEFAULT_TYPE): await qawi(update, context)
-async def saree3(update: Update, context: ContextTypes.DEFAULT_TYPE): await qawi(update, context)
-
 async def qawi(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🔍 عم حلل ايمتا تدخل...")
+    await update.message.reply_text("🔍 عم حدد نقطة دخول...")
     d5=get_candles("5m"); d60=get_candles("1h"); d240=get_candles("4h"); spot=get_spot()
     if len(d5)<50 or not spot: await update.message.reply_text("جرب بعد دقيقة"); return
     
-    c5=[float(x[4]) for x in d5]; o5=[float(x[1]) for x in d5]; h5=[float(x[2]) for x in d5]; l5=[float(x[3]) for x in d5]
+    c5=[float(x[4]) for x in d5]; h5=[float(x[2]) for x in d5]; l5=[float(x[3]) for x in d5]
     c60=[float(x[4]) for x in d60]; c240=[float(x[4]) for x in d240]
     
-    e9_5=ema(c5,9); e21_5=ema(c5,21); e50_5=ema(c5,50)
-    e50_60=ema(c60,50); e200_60=ema(c60,200)
-    e50_240=ema(c240,50)
-    
+    e9=ema(c5,9); e21=ema(c5,21); e50_5=ema(c5,50)
+    e50_60=ema(c60,50); e200_60=ema(c60,200); e50_240=ema(c240,50)
     r5=rsi(c5,7); r60=rsi(c60,14); r240=rsi(c240,14)
-    atr5=sum([h5[i]-l5[i] for i in range(-14,0)])/14
+    atr=sum([h5[i]-l5[i] for i in range(-14,0)])/14
     
-    score=0; reasons=[]
-    if c240[-1]>e50_240: score+=25; reasons.append("✅ 4H صاعد")
-    else: score-=15; reasons.append("🔴 4H هابط")
-    if c60[-1]>e50_60 and c60[-1]>e200_60: score+=25; reasons.append("✅ 1H قوي")
-    elif c60[-1]>e50_60: score+=10; reasons.append("⚠️ 1H متوسط")
-    else: score-=10; reasons.append("🔴 1H ضعيف")
-    if c5[-1]>e9_5 and e9_5>e21_5: score+=20; reasons.append("✅ 5M تقاطع")
-    else: score-=10; reasons.append("🔴 5M هابط")
-    if 45<r5<68: score+=15; reasons.append(f"✅ RSI {r5:.0f} ممتاز")
-    elif r5>72: score-=10; reasons.append(f"⚠️ RSI {r5:.0f} متشبع")
+    # اقرب دعم ومقاومة
+    recent_high=max(h5[-20:]); recent_low=min(l5[-20:])
     
-    dist=abs(c5[-1]-e21_5); last_candle_body=abs(c5[-1]-o5[-1])
+    score=0
+    if c240[-1]>e50_240: score+=30
+    else: score-=20
+    if c60[-1]>e50_60 and c60[-1]>e200_60: score+=30
+    else: score-=10
+    if c5[-1]>e9 and e9>e21: score+=20
+    else: score-=10
+    if 40<r5<68: score+=20
+    else: score-=5
     
-    # تحديد ايمتا تدخل
-    if score>=60 and dist>atr5*0.3 and r5<65:
-        entry_type="🚀 دخول فوري ماركت NOW"
-        entry_price=spot
-        entry_time="هلأ فورا - لا تنتظر"
-        why_entry="السعر بعيد عن EMA و RSI مو متشبع - دخول فوري قبل ما يطير"
-    elif score>=60 and dist<atr5*0.3:
-        entry_type="⏳ انتظار اعادة اختبار"
-        entry_price=e9_5 if c5[-1]>e9_5 else e21_5
-        entry_time=f"حط امر معلق BUY LIMIT عند {entry_price:.2f}$"
-        why_entry=f"السعر قريب كتير من EMA - انتظر يرجع لـ EMA9 عند {entry_price:.2f} وادخل، احسن سعر"
-    elif score>=60 and r5>68:
-        entry_type="⏳ انتظار تصحيح صغير"
-        entry_price=spot-atr5*0.5
-        entry_time=f"لا تدخل هلا RSI عالي - حط BUY LIMIT {entry_price:.2f}$"
-        why_entry="RSI متشبع 68+، السوق رح يصحح 2-3$ وبعدين يطلع - ادخل من تحت"
-    elif score>=30:
-        entry_type="⚡️ سكالبينغ سريع"
-        entry_price=spot
-        entry_time="ادخل هلا بس اطلع بسرعة 5 دقايق"
-        why_entry="قوة متوسطة - صالحة سكالبينغ فقط"
-    elif score>=0:
-        entry_type="⏸️ لا تدخل هلا"
-        entry_price=spot
-        entry_time="انتظر 15 دقيقة وجرب /qawi مرة تانية"
-        why_entry="السوق عرضي وضعيف"
+    if score>=50:
+        # سيناريو شراء - نحدد نقطة دخول دقيقة
+        if c5[-1] > e9 + atr*0.2:
+            # السعر طاير فوق - ننتظر اعادة اختبار
+            entry=round(e9 + atr*0.1, 2)
+            entry_cond=f"اذا نزل السعر ولمس {entry}$ ادخل شراء فورا"
+            order_type=f"BUY LIMIT {entry}$"
+            trigger=f"🔔 حط تنبيه عند {entry}$"
+            sl=round(entry - atr*1.0, 2)
+            tp1=round(entry + atr*1.2, 2)
+            tp2=round(entry + atr*2.5, 2)
+        else:
+            # قريب من EMA - دخول فوري
+            entry=round(spot, 2)
+            entry_cond=f"ادخل شراء هلا فورا على {entry}$"
+            order_type=f"BUY MARKET {entry}$"
+            trigger="🚀 دخول فوري - لا تنتظر"
+            sl=round(spot - atr*1.0, 2)
+            tp1=round(spot + atr*1.2, 2)
+            tp2=round(spot + atr*2.5, 2)
+        sig="🟢 شراء BUY"
+        power="💎 قوي" if score>=70 else "⚠️ متوسط"
+    elif score<=-30:
+        if c5[-1] < e9 - atr*0.2:
+            entry=round(e9 - atr*0.1, 2)
+            entry_cond=f"اذا طلع السعر ولمس {entry}$ ادخل بيع فورا"
+            order_type=f"SELL LIMIT {entry}$"
+            trigger=f"🔔 حط تنبيه عند {entry}$"
+            sl=round(entry + atr*1.0, 2)
+            tp1=round(entry - atr*1.2, 2)
+            tp2=round(entry - atr*2.5, 2)
+        else:
+            entry=round(spot, 2)
+            entry_cond=f"ادخل بيع هلا فورا على {entry}$"
+            order_type=f"SELL MARKET {entry}$"
+            trigger="🚀 دخول فوري"
+            sl=round(spot + atr*1.0, 2)
+            tp1=round(spot - atr*1.2, 2)
+            tp2=round(spot - atr*2.5, 2)
+        sig="🔴 بيع SELL"
+        power="💎 قوي" if score<=-50 else "⚠️ متوسط"
     else:
-        entry_type="🔴 لا تدخل ابدا"
-        entry_price=0
-        entry_time="سوق هابط قوي"
-        why_entry="كل الفريمات هابطة"
+        sig="⏸️ لا تدخل"; entry=spot; entry_cond="انتظر"; order_type="-"; trigger="جرب بعد 15 دقيقة"
+        sl=0; tp1=0; tp2=0; power=f"🔴 ضعيف نقاط {score}"
     
-    if score>20: sig="🟢 شراء BUY"; sl=spot-atr5*1.0; tp1=spot+atr5*1.2; tp2=spot+atr5*2.5
-    elif score<-20: sig="🔴 بيع SELL"; sl=spot+atr5*1.0; tp1=spot-atr5*1.2; tp2=spot-atr5*2.5; 
-    else: sig="⏸️ حيادي"; sl=spot; tp1=spot; tp2=spot
-    
-    if score>=70: power="💎💎💎 قوي جدا 85%+"
-    elif score>=50: power="💎💎 قوي 70%"
-    elif score>=30: power="⚠️ متوسط 55%"
-    else: power="🔴 ضعيف"
-    
-    msg=f"""{sig} - {power}
+    msg=f"""{sig} {power}
 نقاط: {score}/100
 
-{entry_type}
-💵 سعر الدخول: {entry_price:.2f}$
-🛑 وقف: {sl:.2f}$
-🎯 هدف1: {tp1:.2f}$ | هدف2: {tp2:.2f}$
+🎯 نقطة الدخول بالضبط:
+{entry_cond}
 
-⏰ ايمتا تدخل؟
-{entry_time}
+📝 الامر:
+{order_type}
+وقف: {sl}$
+هدف1: {tp1}$ 
+هدف2: {tp2}$
 
-❓ ليش؟
-{why_entry}
+{trigger}
 
-📊 التحليل:
-{chr(10).join(reasons)}
-RSI 5M {r5:.1f} | 1H {r60:.1f} | 4H {r240:.1f}
-EMA9 {e9_5:.2f} | EMA21 {e21_5:.2f} | ATR {atr5:.2f}$
-جسم الشمعة الاخيرة: {last_candle_body:.2f}$
+📊 ليش هالنقطة؟
+السعر الحالي: {spot:.2f}$
+EMA9: {e9:.2f}$ (نقطة اعادة الاختبار)
+EMA21: {e21:.2f}$
+دعم 20 شمعة: {recent_low:.2f}$
+مقاومة 20 شمعة: {recent_high:.2f}$
+RSI 5m: {r5:.1f} | 1h: {r60:.1f} | 4h: {r240:.1f}
+ATR: {atr:.2f}$
 
-💡 مثال امر:
-اذا قال LIMIT حط:
-BUY LIMIT {entry_price:.2f}
-SL {sl:.2f}
-TP {tp1:.2f}
+💡 اذا وصل السعر لـ {entry}$ ادخل واذا ما وصل لا تدخل - لا تلحق السوق!
 """
     await update.message.reply_text(msg)
 
+async def tawsiya(update: Update, context: ContextTypes.DEFAULT_TYPE): await qawi(update, context)
+async def saree3(update: Update, context: ContextTypes.DEFAULT_TYPE): await qawi(update, context)
+
 if __name__ == "__main__":
     bot = Application.builder().token(TOKEN).build()
-    for cmd, fn in [("start", start), ("gold", gold), ("tawsiya", tawsiya), ("saree3", saree3), ("qawi", qawi)]:
+    for cmd, fn in [("start", start), ("gold", gold), ("qawi", qawi), ("tawsiya", tawsiya), ("saree3", saree3)]:
         bot.add_handler(CommandHandler(cmd, fn))
     bot.run_polling()
