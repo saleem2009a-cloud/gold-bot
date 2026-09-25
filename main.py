@@ -6,7 +6,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 
 app = Flask(__name__)
 @app.route('/')
-def home(): return "Gold Arabic Only"
+def home(): return "Gold No Trap"
 def run_flask():
     port=int(os.environ.get("PORT",10000))
     app.run(host='0.0.0.0',port=port)
@@ -23,7 +23,7 @@ def get_price():
 def get_klines(interval, limit=100):
     try:
         d=requests.get(f"https://data-api.binance.vision/api/v3/klines?symbol=PAXGUSDT&interval={interval}&limit={limit}",timeout=8).json()
-        if isinstance(d,list) and len(d)>70: return d
+        if isinstance(d,list) and len(d)>80: return d
     except: pass
     return []
 
@@ -32,137 +32,128 @@ def ema(prices,p):
     for x in prices[p:]: e=x*k+e*(1-k)
     return e
 
-def rsi(prices, p=14):
-    gains=losses=0
-    for i in range(1,p+1):
-        diff=prices[-i]-prices[-i-1]
-        if diff>0: gains+=diff
-        else: losses+=-diff
-    if losses==0: return 70
-    return 100-(100/(1+gains/losses if losses!=0 else 1))
-
 def analyze():
     spot=get_price()
-    kl5=get_klines("5m",100); kl15=get_klines("15m",100); kl60=get_klines("1h",100); kl240=get_klines("4h",100)
+    kl15=get_klines("15m",100); kl60=get_klines("1h",100); kl240=get_klines("4h",100); kl1440=get_klines("1d",100)
     if not spot: return None
 
-    c5=[float(x[4]) for x in kl5]
     c15=[float(x[4]) for x in kl15]; h15=[float(x[2]) for x in kl15]; l15=[float(x[3]) for x in kl15]
-    c60=[float(x[4]) for x in kl60] if kl60 else c5
-    c240=[float(x[4]) for x in kl240] if kl240 else c60
+    c60=[float(x[4]) for x in kl60]; h60=[float(x[2]) for x in kl60]; l60=[float(x[3]) for x in kl60]
+    c240=[float(x[4]) for x in kl240]
+    c1440=[float(x[4]) for x in kl1440] if kl1440 else c240
 
-    e50_5=ema(c5,50); e200_5=ema(c5,200)
-    e50_1h=ema(c60,50); e50_4h=ema(c240,50)
-    rsi15=rsi(c15)
+    e50_15=ema(c15,50); e200_15=ema(c15,200)
+    e50_1h=ema(c60,50); e200_1h=ema(c60,200)
+    e50_4h=ema(c240,50); e200_4h=ema(c240,200)
+    e50_d=ema(c1440,50)
 
-    score=0
-    if c15[-1] > e50_5: score+=1
-    if e50_5 > e200_5: score+=1
-    if c60[-1] > e50_1h: score+=1
-    if c240[-1] > e50_4h: score+=1
-    if rsi15 > 52: score+=1
+    # === كشف الترند القوي - ممنوع عكسه ===
+    up_4h = c240[-1] > e50_4h and e50_4h > e200_4h
+    down_4h = c240[-1] < e50_4h and e50_4h < e200_4h
+    up_1h = c60[-1] > e50_1h and e50_1h > e200_1h
+    down_1h = c60[-1] < e50_1h and e50_1h < e200_1h
 
-    sup1=round(min(l15[-30:]),2); res1=round(max(h15[-30:]),2)
+    # قوة الترند من 0-100
+    if up_4h and up_1h and c15[-1] > e50_15:
+        trend = "صاعد قوي جدا"; power_trend = 95; direction = "شراء فقط"
+    elif down_4h and down_1h and c15[-1] < e50_15:
+        trend = "هابط قوي جدا"; power_trend = 95; direction = "بيع فقط"
+    elif up_1h:
+        trend = "صاعد"; power_trend = 70; direction = "شراء"
+    elif down_1h:
+        trend = "هابط"; power_trend = 70; direction = "بيع"
+    else:
+        trend = "عرضي"; power_trend = 30; direction = "انتظار"
+
+    sup = round(min(l15[-20:]),2)
+    res = round(max(h15[-20:]),2)
+    high_1h = max(h60[-12:]); low_1h = min(l60[-12:])
+
     hour=datetime.utcnow().hour
+    if 8 <= hour <= 11: sess="🔥 لندن"; sess_power=95
+    elif 13 <= hour <= 16: sess="💥 نيويورك"; sess_power=100
+    else: sess="🌙 ضعيف"; sess_power=20
 
-    if 8 <= hour <= 11: session="🔥 لندن - قوة 95%"; power=95; time_ok=True
-    elif 13 <= hour <= 16: session="💥 نيويورك - قوة 100%"; power=100; time_ok=True
-    else: session="🌙 سوق ضعيف"; power=30; time_ok=False
+    # === قرار مستحيل يورطك ===
+    if power_trend >= 70 and "شراء" in direction:
+        # ترند صاعد - ممنوع البيع نهائيا
+        if sess_power < 50:
+            return {"spot":spot,"decision":"⏸️ انتظار","reason":f"ترند {trend} بس {sess} ضعيف - انتظر لندن او نيويورك","time_ok":False,"sup":sup,"res":res,"trend":trend,"power":power_trend,"sess":sess,"sess_power":sess_power}
 
-    if not time_ok:
-        return {"spot":spot,"decision":"⏸️ انتظار","reason":f"{session} - انتظر وقت قوي","time_ok":False,"sup":sup1,"res":res1,"score":score,"rsi":rsi15,"session":session,"power":power}
+        decision="🟢 شراء فقط - ممنوع البيع"
+        entry_type=f"دخول مباشر هلا {spot:.2f} دولار"
+        entry=spot
+        sl=round(spot-5,2)
+        tp1=round(spot+6,2)
+        tp2=round(spot+13,2)
+        tp3=round(spot+22,2)
+        reason=f"الذهب طاير لفوق M15 و M30 و 1H كلهم خضر متل شارتك - اذا بعت بتتعلق - بس شراء"
 
-    if score >= 3:
-        distance_to_sup = spot - sup1
-        if distance_to_sup > 8:
-            entry = spot
-            entry_type = f"دخول مباشر هلا {spot:.2f}$"
-            sl = round(spot-4,2)
-            tp1 = round(spot+4,2)
-            tp2 = round(spot+9,2)
-            tp3 = round(spot+16,2)
-        else:
-            entry = round(spot-1.5,2)
-            entry_type = f"أمر معلق عند {entry:.2f}$ (تصحيح صغير)"
-            sl = round(entry-4,2)
-            tp1 = round(entry+5,2)
-            tp2 = round(entry+10,2)
-            tp3 = round(entry+17,2)
-
-        decision="🟢 شراء"
-        reason=f"ترند صاعد {score}/5 + {session} - ممنوع البيع"
+    elif power_trend >=70 and "بيع" in direction:
+        decision="🔴 بيع فقط - ممنوع الشراء"
+        entry_type=f"دخول مباشر هلا {spot:.2f} دولار"
+        entry=spot
+        sl=round(spot+5,2)
+        tp1=round(spot-6,2)
+        tp2=round(spot-13,2)
+        tp3=round(spot-22,2)
+        reason=f"ترند {trend} قوي - اي صعود هو بيع"
 
     else:
-        distance_to_res = res1 - spot
-        if distance_to_res > 8:
-            entry = spot
-            entry_type = f"دخول مباشر هلا {spot:.2f}$"
-            sl = round(spot+4,2)
-            tp1 = round(spot-4,2)
-            tp2 = round(spot-9,2)
-            tp3 = round(spot-16,2)
-        else:
-            entry = round(spot+1.5,2)
-            entry_type = f"أمر معلق عند {entry:.2f}$ (تصحيح صغير)"
-            sl = round(entry+4,2)
-            tp1 = round(entry-5,2)
-            tp2 = round(entry-10,2)
-            tp3 = round(entry-17,2)
-
-        decision="🔴 بيع"
-        reason=f"ترند هابط {score}/5 + {session}"
+        return {"spot":spot,"decision":"⏸️ انتظار - سوق عرضي","reason":f"ترند {trend} - السوق عرضي - لا تدخل","time_ok":False,"sup":sup,"res":res,"trend":trend,"power":power_trend,"sess":sess,"sess_power":sess_power}
 
     return {
         "spot":spot,"decision":decision,"entry":entry,"entry_type":entry_type,
-        "sl":sl,"tp1":tp1,"tp2":tp2,"tp3":tp3,"sup":sup1,"res":res1,"score":score,
-        "rsi":rsi15,"session":session,"power":power,"reason":reason,"time_ok":True
+        "sl":sl,"tp1":tp1,"tp2":tp2,"tp3":tp3,"sup":sup,"res":res,
+        "trend":trend,"power":power_trend,"sess":sess,"sess_power":sess_power,
+        "reason":reason,"time_ok":True,"high_1h":high_1h,"low_1h":low_1h
     }
 
 async def start(update:Update, context:ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("✅ بوت عربي كامل\n/tawsiya")
+    await update.message.reply_text("✅ بوت ما بيورط - بيمشي مع الترند\n/tawsiya")
 
 async def tawsiya(update:Update, context:ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("⏳ عم حلل...")
+    await update.message.reply_text("⏳ عم حلل الترند القوي...")
     d=analyze()
     if not d:
         await update.message.reply_text("زحمة - جرب بعد 10 ثواني"); return
-
     now=datetime.utcnow().strftime("%H:%M توقيت عالمي")
 
     if not d['time_ok']:
-        msg=f"""💰 السعر هلا: {d['spot']:.2f} دولار
+        msg=f"""💰 {d['spot']:.2f} دولار | {now}
 
-⏰ الدورة: {d['session']}
-القوة: {d['power']}%
+📈 الترند: {d['trend']} قوة {d['power']}%
+⏰ الجلسة: {d['sess']} قوة {d['sess_power']}%
 
-⏸️ انتظار
+⏸️ {d['decision']}
 {d['reason']}
 
-الدعم {d['sup']}$ | المقاومة {d['res']}$
+الدعم {d['sup']}$ المقاومة {d['res']}$
+
+💡 متل حالتك اليوم - كنت بايع بترند صاعد - هاد البوت الجديد ما بيعطيك بيع ابدا اذا الترند صاعد قوي
 """
     else:
-        msg=f"""💰 السعر هلا: {d['spot']:.2f} دولار | {now}
+        msg=f"""💰 {d['spot']:.2f} دولار | {now}
 
-⏰ الدورة: {d['session']}
-القوة: {d['power']}%
+📈 الترند: {d['trend']} قوة {d['power']}% - {d['sess']} قوة {d['sess_power']}%
 
-━━━━━━━━━━━━━━━
-{d['decision']} - واضح
-━━━━━━━━━━━━━━━
+{d['decision']}
+
 🎯 {d['entry_type']}
-السعر الحالي {d['spot']:.2f} دولار
+السعر هلا {d['spot']:.2f} دولار
 
 🛑 وقف الخسارة: {d['sl']} دولار
-💰 الهدف الأول: {d['tp1']} دولار - سكر 50%
-💰 الهدف الثاني: {d['tp2']} دولار - سكر 30%
-💰 الهدف الثالث: {d['tp3']} دولار - سكر 20%
+💰 هدف أول: {d['tp1']} دولار
+💰 هدف ثاني: {d['tp2']} دولار
+💰 هدف ثالث: {d['tp3']} دولار
 
 📊 السبب:
 {d['reason']}
-التقييم {d['score']}/5 | مؤشر القوة {d['rsi']:.0f}
-الدعم {d['sup']} دولار | المقاومة {d['res']} دولار
 
-⏱️ مدة الوصول: {'نص ساعة لساعة' if d['power']>80 else 'ساعة ل 3 ساعات'}
+الدعم {d['sup']}$ المقاومة {d['res']}$
+قمة الساعة {d['high_1h']:.2f}$ قاع الساعة {d['low_1h']:.2f}$
+
+✅ هاد البوت اذا شاف شارتك يلي بالصورة - كل الشموع خضرا طالعة - مستحيل يقلك بيع
 """
 
     await update.message.reply_text(msg)
