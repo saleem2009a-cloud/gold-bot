@@ -4,14 +4,21 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 app = Flask(__name__)
+
 @app.route('/')
-def home(): return "Gold V6 Fixed"
-threading.Thread(target=lambda: app.run(host='0.0.0.0', port=int(os.environ.get("PORT",10000))), daemon=True).start()
+def home():
+    return "Gold V6 Fixed - Live ✅"
+
+def run_flask():
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host='0.0.0.0', port=port)
+
+# شغل فلاسك بخيط منفصل
+threading.Thread(target=run_flask, daemon=True).start()
 
 TOKEN = os.environ.get("BOT_TOKEN")
 
 def get_price():
-    # 3 مصادر
     urls = [
         "https://api.gold-api.com/price/XAU",
         "https://data-asg.goldprice.org/dbXRates/XAU",
@@ -27,8 +34,7 @@ def get_price():
     return None
 
 def get_candles(tf="5m", limit=100):
-    # نجرب 3 سيرفرات بينانس
-    bases = ["https://data-api.binance.vision","https://api.binance.com","https://api1.binance.com"]
+    bases = ["https://data-api.binance.vision","https://api.binance.com"]
     for base in bases:
         try:
             url = f"{base}/api/v3/klines?symbol=PAXGUSDT&interval={tf}&limit={limit}"
@@ -79,7 +85,7 @@ async def test(update, context):
     for tf in ["5m","1h","4h"]:
         d=get_candles(tf)
         msg+=f"{tf}: {len(d)} شمعة {'✅' if len(d)>80 else '❌'}\n"
-    if p:
+    if p and len(get_candles("5m"))>10:
         d5=get_candles("5m")
         c5=[float(x[4]) for x in d5]
         msg+=f"\nRSI 5M: {rsi(c5):.1f}\nEMA9 {ema(c5,9):.2f} EMA21 {ema(c5,21):.2f}"
@@ -108,17 +114,64 @@ async def tawsiya(update, context):
     e50_240=ema(c240,50)
 
     r5=rsi(c5,14); r60=rsi(c60,14); r240=rsi(c240,14)
-    atr5=atr(d5); atr60=atr(d60) if len(d60)>14 else atr5*3
+    atr5=atr(d5)
 
-    # حساب دقيق
     score=50
     reasons=[]
 
-    # 4H
-    if c240[-1] > e50_240: score+=15; reasons.append(f"✅ 4H صاعد {c240[-1]:.1f}>{e50_240:.1f}")
-    else: score-=15; reasons.append(f"🔴 4H هابط {c240[-1]:.1f}<{e50_240:.1f}")
+    if c240[-1] > e50_240: score+=15; reasons.append(f"✅ 4H صاعد")
+    else: score-=15; reasons.append(f"🔴 4H هابط")
 
-    # 1H
     if c60[-1] > e50_60 and c60[-1] > e200_60: score+=20; reasons.append("✅ 1H فوق 50+200")
     elif c60[-1] > e50_60: score+=8; reasons.append("⚠️ 1H فوق 50")
-    else: score-=12; reasons
+    else: score-=12; reasons.append("🔴 1H هابط")
+
+    if c5[-1] > e9 and e9 > e21: score+=20; reasons.append(f"✅ 5M صاعد")
+    else: score-=10; reasons.append(f"🔴 5M هابط")
+
+    if abs(e9-e21) < atr5*0.2:
+        await update.message.reply_text(f"⏸️ **توصية: انتظار - عرضي**\nالسعر {price:.2f}\nEMA9 {e9:.2f} = EMA21 {e21:.2f}")
+        return
+
+    if score>=70: power="💎💎💎 قوي جدا 85-90%"
+    elif score>=60: power="💎💎 قوي 75%"
+    elif score>=45: power="⚠️ متوسط 55%"
+    else: power=f"🔴 ضعيف {score}%"
+
+    if score>52:
+        sig="🟢 **توصية: شراء BUY**"; sl=price-atr5*1.2; tp1=price+atr5*1.0; tp2=price+atr5*2.2
+    elif score<42:
+        sig="🔴 **توصية: بيع SELL**"; sl=price+atr5*1.2; tp1=price-atr5*1.0; tp2=price-atr5*2.2
+    else:
+        sig="⏸️ **حيادي**"; sl=tp1=tp2=price
+
+    txt=f"""{sig}
+{power} | {score}/100
+
+💵 دخول: {price:.2f}
+🛑 وقف: {sl:.2f}
+🎯 هدف1: {tp1:.2f}
+🎯 هدف2: {tp2:.2f}
+
+📊 ليش؟
+{chr(10).join(reasons)}
+
+RSI: 5M {r5:.1f} 1H {r60:.1f} 4H {r240:.1f}
+ATR 5M {atr5:.2f}
+"""
+    await update.message.reply_text(txt)
+
+if __name__ == "__main__":
+    if not TOKEN:
+        print("❌ BOT_TOKEN missing! Add it in Render Environment")
+    else:
+        print(f"✅ Bot starting with token {TOKEN[:10]}...")
+        bot = Application.builder().token(TOKEN).build()
+        bot.add_handler(CommandHandler("start", start))
+        bot.add_handler(CommandHandler("gold", gold))
+        bot.add_handler(CommandHandler("test", test))
+        bot.add_handler(CommandHandler("tawsiya", tawsiya))
+        bot.add_handler(CommandHandler("tawsiyat", tawsiya))
+        bot.add_handler(CommandHandler("qawi", tawsiya))
+        bot.add_handler(CommandHandler("saree3", tawsiya))
+        bot.run_polling()
