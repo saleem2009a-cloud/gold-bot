@@ -6,7 +6,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 
 app = Flask(__name__)
 @app.route('/')
-def home(): return "Gold Fixed Buy Sell"
+def home(): return "Gold Arabic Only"
 def run_flask():
     port=int(os.environ.get("PORT",10000))
     app.run(host='0.0.0.0',port=port)
@@ -46,16 +46,15 @@ def analyze():
     kl5=get_klines("5m",100); kl15=get_klines("15m",100); kl60=get_klines("1h",100); kl240=get_klines("4h",100)
     if not spot: return None
 
-    c5=[float(x[4]) for x in kl5]; h5=[float(x[2]) for x in kl5]; l5=[float(x[3]) for x in kl5]
+    c5=[float(x[4]) for x in kl5]
     c15=[float(x[4]) for x in kl15]; h15=[float(x[2]) for x in kl15]; l15=[float(x[3]) for x in kl15]
     c60=[float(x[4]) for x in kl60] if kl60 else c5
     c240=[float(x[4]) for x in kl240] if kl240 else c60
 
     e50_5=ema(c5,50); e200_5=ema(c5,200)
-    e50_1h=ema(c60,50); e50_4h=ema(c240,50); e200_1h=ema(c60,200)
+    e50_1h=ema(c60,50); e50_4h=ema(c240,50)
     rsi15=rsi(c15)
 
-    # ترند واضح
     score=0
     if c15[-1] > e50_5: score+=1
     if e50_5 > e200_5: score+=1
@@ -66,73 +65,61 @@ def analyze():
     sup1=round(min(l15[-30:]),2); res1=round(max(h15[-30:]),2)
     hour=datetime.utcnow().hour
 
-    # دورة زمنية
-    if 8 <= hour <= 11:
-        session="🔥 لندن - قوة 95%"; power=95; time_ok=True
-    elif 13 <= hour <= 16:
-        session="💥 نيويورك - قوة 100%"; power=100; time_ok=True
-    elif 6 <= hour <= 7:
-        session="⚠️ قبل لندن - قوة 50%"; power=50; time_ok=False
-    elif 11 <= hour <= 12:
-        session="📉 بين الجلستين - قوة 40%"; power=40; time_ok=False
-    else:
-        session="🌙 آسيا/مسائي - قوة 20% - ميت"; power=20; time_ok=False
+    if 8 <= hour <= 11: session="🔥 لندن - قوة 95%"; power=95; time_ok=True
+    elif 13 <= hour <= 16: session="💥 نيويورك - قوة 100%"; power=100; time_ok=True
+    else: session="🌙 سوق ضعيف"; power=30; time_ok=False
 
-    # === قرار واضح شراء ولا بيع ===
     if not time_ok:
-        decision = "⏸️ انتظار"
-        side = "لا تدخل هلا"
-        entry = 0
-        reason = f"{session} - السوق ضعيف - انتظر لندن 8:00 او نيويورك 13:00 UTC"
-    elif score >= 3: # صاعد
-        decision = "🟢 شراء"
-        side = "BUY"
-        # دخول واضح
-        if spot - sup1 < 4: # قريب من الدعم
-            entry = spot
-            entry_type = "MARKET هلا"
-        else:
-            entry = round(sup1+1.2,2)
-            entry_type = f"LIMIT {entry}$ عند الدعم"
-        reason = f"ترند صاعد Score {score}/5 + {session} = ممنوع البيع - بس شراء"
-    else: # هابط
-        decision = "🔴 بيع"
-        side = "SELL"
-        if res1 - spot < 4:
-            entry = spot
-            entry_type = "MARKET هلا"
-        else:
-            entry = round(res1-1.2,2)
-            entry_type = f"LIMIT {entry}$ عند المقاومة"
-        reason = f"ترند هابط Score {score}/5 + {session} = ممنوع الشراء - بس بيع"
+        return {"spot":spot,"decision":"⏸️ انتظار","reason":f"{session} - انتظر وقت قوي","time_ok":False,"sup":sup1,"res":res1,"score":score,"rsi":rsi15,"session":session,"power":power}
 
-    if decision == "⏸️ انتظار":
-        return {
-            "spot":spot,"decision":decision,"side":side,"entry":0,"session":session,"power":power,
-            "sup":sup1,"res":res1,"score":score,"rsi":rsi15,"reason":reason,"time_ok":False,
-            "sl":0,"tp1":0,"tp2":0,"entry_type":""
-        }
+    if score >= 3:
+        distance_to_sup = spot - sup1
+        if distance_to_sup > 8:
+            entry = spot
+            entry_type = f"دخول مباشر هلا {spot:.2f}$"
+            sl = round(spot-4,2)
+            tp1 = round(spot+4,2)
+            tp2 = round(spot+9,2)
+            tp3 = round(spot+16,2)
+        else:
+            entry = round(spot-1.5,2)
+            entry_type = f"أمر معلق عند {entry:.2f}$ (تصحيح صغير)"
+            sl = round(entry-4,2)
+            tp1 = round(entry+5,2)
+            tp2 = round(entry+10,2)
+            tp3 = round(entry+17,2)
 
-    # ستوب واهداف حسب الدورة
-    if decision == "🟢 شراء":
-        sl = round(entry-4.5,2) if entry!=spot else round(spot-2,2)
-        tp1 = round(entry+ (6 if power>80 else 3),2)
-        tp2 = round(entry+ (12 if power>80 else 6),2)
-        tp3 = round(entry+ (20 if power>80 else 10),2)
+        decision="🟢 شراء"
+        reason=f"ترند صاعد {score}/5 + {session} - ممنوع البيع"
+
     else:
-        sl = round(entry+4.5,2) if entry!=spot else round(spot+2,2)
-        tp1 = round(entry- (6 if power>80 else 3),2)
-        tp2 = round(entry- (12 if power>80 else 6),2)
-        tp3 = round(entry- (20 if power>80 else 10),2)
+        distance_to_res = res1 - spot
+        if distance_to_res > 8:
+            entry = spot
+            entry_type = f"دخول مباشر هلا {spot:.2f}$"
+            sl = round(spot+4,2)
+            tp1 = round(spot-4,2)
+            tp2 = round(spot-9,2)
+            tp3 = round(spot-16,2)
+        else:
+            entry = round(spot+1.5,2)
+            entry_type = f"أمر معلق عند {entry:.2f}$ (تصحيح صغير)"
+            sl = round(entry+4,2)
+            tp1 = round(entry-5,2)
+            tp2 = round(entry-10,2)
+            tp3 = round(entry-17,2)
+
+        decision="🔴 بيع"
+        reason=f"ترند هابط {score}/5 + {session}"
 
     return {
-        "spot":spot,"decision":decision,"side":side,"entry":entry,"entry_type":entry_type,
-        "session":session,"power":power,"sup":sup1,"res":res1,"score":score,"rsi":rsi15,
-        "reason":reason,"time_ok":True,"sl":sl,"tp1":tp1,"tp2":tp2,"tp3":tp3
+        "spot":spot,"decision":decision,"entry":entry,"entry_type":entry_type,
+        "sl":sl,"tp1":tp1,"tp2":tp2,"tp3":tp3,"sup":sup1,"res":res1,"score":score,
+        "rsi":rsi15,"session":session,"power":power,"reason":reason,"time_ok":True
     }
 
 async def start(update:Update, context:ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("✅ بوت مصلح - بيحدد شراء ولا بيع بوضوح\n/tawsiya")
+    await update.message.reply_text("✅ بوت عربي كامل\n/tawsiya")
 
 async def tawsiya(update:Update, context:ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ عم حلل...")
@@ -140,46 +127,42 @@ async def tawsiya(update:Update, context:ContextTypes.DEFAULT_TYPE):
     if not d:
         await update.message.reply_text("زحمة - جرب بعد 10 ثواني"); return
 
-    now=datetime.utcnow().strftime("%H:%M UTC")
+    now=datetime.utcnow().strftime("%H:%M توقيت عالمي")
 
     if not d['time_ok']:
-        msg=f"""💰 {d['spot']:.2f}$ | {now}
+        msg=f"""💰 السعر هلا: {d['spot']:.2f} دولار
 
 ⏰ الدورة: {d['session']}
-قوة: {d['power']}%
+القوة: {d['power']}%
 
-{d['decision']} - {d['side']}
-❌ {d['reason']}
+⏸️ انتظار
+{d['reason']}
 
-دعم {d['sup']}$ مقاومة {d['res']}$
-Score {d['score']}/5 RSI {d['rsi']:.0f}
-
-💡 لا تدخل هلا - انتظر وقت قوي
+الدعم {d['sup']}$ | المقاومة {d['res']}$
 """
     else:
-        msg=f"""💰 {d['spot']:.2f}$ | {now}
+        msg=f"""💰 السعر هلا: {d['spot']:.2f} دولار | {now}
 
 ⏰ الدورة: {d['session']}
-قوة: {d['power']}%
+القوة: {d['power']}%
 
 ━━━━━━━━━━━━━━━
-{d['decision']} - {d['side']} - واضح
+{d['decision']} - واضح
 ━━━━━━━━━━━━━━━
-🎯 دخول: {d['entry_type']}
-السعر هلا {d['spot']:.2f}$
+🎯 {d['entry_type']}
+السعر الحالي {d['spot']:.2f} دولار
 
-🛑 ستوب: {d['sl']}$
-💰 هدف1: {d['tp1']}$ سكر 50%
-💰 هدف2: {d['tp2']}$ سكر 30%
-💰 هدف3: {d['tp3']}$ سكر 20%
+🛑 وقف الخسارة: {d['sl']} دولار
+💰 الهدف الأول: {d['tp1']} دولار - سكر 50%
+💰 الهدف الثاني: {d['tp2']} دولار - سكر 30%
+💰 الهدف الثالث: {d['tp3']} دولار - سكر 20%
 
-📊 ليش {d['decision']}؟
+📊 السبب:
 {d['reason']}
-Score {d['score']}/5 | RSI 15m {d['rsi']:.0f}
-دعم {d['sup']}$ | مقاومة {d['res']}$
+التقييم {d['score']}/5 | مؤشر القوة {d['rsi']:.0f}
+الدعم {d['sup']} دولار | المقاومة {d['res']} دولار
 
-⏱️ ايمتى يوصل؟
-قوة {d['power']}% = {'30-60 دقيقة' if d['power']>80 else '1-3 ساعات'}
+⏱️ مدة الوصول: {'نص ساعة لساعة' if d['power']>80 else 'ساعة ل 3 ساعات'}
 """
 
     await update.message.reply_text(msg)
@@ -188,5 +171,4 @@ if __name__=="__main__":
     bot=Application.builder().token(TOKEN).build()
     bot.add_handler(CommandHandler("start",start))
     bot.add_handler(CommandHandler("tawsiya",tawsiya))
-    bot.add_handler(CommandHandler("qawi",tawsiya))
     bot.run_polling()
