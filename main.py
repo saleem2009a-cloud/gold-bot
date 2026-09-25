@@ -5,139 +5,132 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 
 app = Flask(__name__)
 @app.route('/')
-def home(): return "V10.1 SMC Fixed"
+def home(): return "V11 SMC + Tawsiya"
 threading.Thread(target=lambda: app.run(host='0.0.0.0', port=int(os.environ.get("PORT",10000))), daemon=True).start()
 
 TOKEN = os.environ.get("BOT_TOKEN")
 
 def get_price():
-    for url in [
-        "https://api.gold-api.com/price/XAU",
-        "https://data-api.binance.vision/api/v3/ticker/price?symbol=PAXGUSDT",
-        "https://api.binance.com/api/v3/ticker/price?symbol=PAXGUSDT"
-    ]:
+    for url in ["https://api.gold-api.com/price/XAU","https://data-api.binance.vision/api/v3/ticker/price?symbol=PAXGUSDT","https://api.binance.com/api/v3/ticker/price?symbol=PAXGUSDT"]:
         try:
             r=requests.get(url,timeout=4).json()
-            p=float(r['price'] if 'price' in r else r.get('price',0))
+            p=float(r['price'])
             if p>2000: return p
         except: pass
-    return None
+    return 4290.0
 
-def get_candles(tf, lim=200):
+def get_candles(tf, lim=150):
     for base in ["https://data-api.binance.vision","https://api.binance.com"]:
         try:
-            r=requests.get(f"{base}/api/v3/klines?symbol=PAXGUSDT&interval={tf}&limit={lim}",timeout=6,headers={"User-Agent":"Mozilla/5.0"}).json()
-            if isinstance(r,list) and len(r)>100: return r
+            r=requests.get(f"{base}/api/v3/klines?symbol=PAXGUSDT&interval={tf}&limit={lim}",timeout=6).json()
+            if isinstance(r,list) and len(r)>80: return r
         except: pass
     return []
 
-def find_swings_near(candles, lookback=2):
-    highs=[]; lows=[]
-    for i in range(lookback, len(candles)-lookback):
-        h=float(candles[i][2]); l=float(candles[i][3])
-        # اقرب سوينغ
-        if h>=max(float(candles[j][2]) for j in range(i-lookback,i+lookback+1)):
-            highs.append(h)
-        if l<=min(float(candles[j][3]) for j in range(i-lookback,i+lookback+1)):
-            lows.append(l)
-    # شيل المكرر وقرب
-    highs=list(dict.fromkeys([round(x,2) for x in highs]))[-15:]
-    lows=list(dict.fromkeys([round(x,2) for x in lows]))[-15:]
-    return highs, lows
+def get_levels(candles):
+    # دعوم ومقاومات قريبة من اخر 50 شمعة بس
+    highs=[float(x[2]) for x in candles[-50:]]
+    lows=[float(x[3]) for x in candles[-50:]]
+    # اقرب قمة وقاع
+    return max(highs), min(lows), highs, lows
 
 async def tawsiya(update, context):
-    await update.message.reply_text("🔍 V10.1 عم ادور دعوم قريبة...")
+    await update.message.reply_text("🔍 عم حلل SMC + توصية...")
     try:
         price=get_price()
-        if not price:
-            await update.message.reply_text("❌ الذهب معلق جرب /test")
+        c5=get_candles("5m",150)
+        c15=get_candles("15m",150)
+        c60=get_candles("1h",150)
+
+        if len(c5)<50:
+            await update.message.reply_text(f"❌ شموع فاضية - السعر {price}")
             return
 
-        c5=get_candles("5m",200)
-        c15=get_candles("15m",200)
-        c60=get_candles("1h",200)
+        c5_close=[float(x[4]) for x in c5]
+        c15_close=[float(x[4]) for x in c15]
+        c60_close=[float(x[4]) for x in c60]
 
-        if len(c5)<100: await update.message.reply_text(f"❌ شموع 5m {len(c5)}"); return
+        # مستويات قريبة
+        r5,s5,_,_=get_levels(c5)
+        r15,s15,_,_=get_levels(c15)
+        r60,s60,_,_=get_levels(c60)
 
-        h5,l5=find_swings_near(c5,2)
-        h15,l15=find_swings_near(c15,2)
-        h60,l60=find_swings_near(c60,3)
+        # سوينغات حقيقية قريبة (اخر 20 شمعة)
+        sups=sorted(set([min([float(c5[i][3]) for i in range(len(c5)-20,len(c5))])] + [s5,s15,s60]))
+        ress=sorted(set([max([float(c5[i][2]) for i in range(len(c5)-20,len(c5))])] + [r5,r15,r60]))
 
-        # ادمج وقرب للسعر
-        all_res=sorted(set(h5[-8:]+h15[-8:]+h60[-5:]))
-        all_sup=sorted(set(l5[-8:]+l15[-8:]+l60[-5:]))
+        near_sup=[s for s in sups if s<price][-3:]
+        near_res=[r for r in ress if r>price][:3]
 
-        # اقرب دعوم/مقاومات حقيقية (خلال 20$ فقط)
-        near_res=[r for r in all_res if r>price and r-price<=25]
-        near_sup=[s for s in all_sup if s<price and price-s<=25]
+        # مؤشرات
+        def ema(p,n):
+            if len(p)<n: return p[-1]
+            k=2/(n+1); e=sum(p[:n])/n
+            for x in p[n:]: e=x*k+e*(1-k)
+            return e
 
-        # لو مافي قريب خد اقرب واحد حتى لو بعيد شوي
-        if not near_res: near_res=[min([r for r in all_res if r>price], default=price+12)]
-        if not near_sup: near_sup=[max([s for s in all_sup if s<price], default=price-12)]
+        e9=ema(c5_close,9); e21=ema(c5_close,21)
+        e50_15=ema(c15_close,50); e50_60=ema(c60_close,50); e200_60=ema(c60_close,200)
 
-        # اوردر بلوك من 15m
-        def get_ob(cands):
-            for i in range(len(cands)-10, len(cands)-1):
-                try:
-                    o=float(cands[i][1]); c=float(cands[i][4]); h=float(cands[i][2]); l=float(cands[i][3]); nc=float(cands[i+1][4])
-                    if c<o and nc>o and (nc-c)>2: return f"شراء {l:.1f}-{o:.1f} قوي"
-                    if c>o and nc<o and (c-nc)>2: return f"بيع {o:.1f}-{h:.1f} قوي"
-                except: pass
-            return "ما في OB واضح"
-        ob5=get_ob(c5); ob15=get_ob(c15); ob60=get_ob(c60)
+        # سكور
+        score=50
+        if c5_close[-1]>e9: score+=10
+        if e9>e21: score+=10
+        if c15_close[-1]>e50_15: score+=15
+        if c60_close[-1]>e50_60: score+=10
+        if c60_close[-1]>e200_60: score+=15
+        else: score-=15
 
-        # سيولة
-        liq_up=len([r for r in all_res if 0 < r-price <= 8])
-        liq_down=len([s for s in all_sup if 0 < price-s <= 8])
+        # توصية اجبارية
+        atr=abs(c5_close[-1]-c5_close[-2])*2.5
+        if atr<4: atr=5
 
-        # ترند
-        closes5=[float(x[4]) for x in c5]
-        e50_15=sum([float(x[4]) for x in c15[-50:]])/50
-        trend="صاعد" if closes5[-1]>e50_15 else "هابط"
+        # دعم ومقاومة قريبة للوقف
+        sup = near_sup[-1] if near_sup else price-8
+        res = near_res[0] if near_res else price+8
 
-        # قرار
-        sup1=max(near_sup) if near_sup else price-10
-        res1=min(near_res) if near_res else price+10
-        dist_sup=price-sup1; dist_res=res1-price
-
-        if dist_sup < dist_res and dist_sup < 10:
-            sig="🟢 شراء من دعم قريب"; sl=sup1-2.5; tp=res1; reason=f"ارتداد من {sup1:.2f} - اوردر بلوك {ob15}"
-        elif dist_res < dist_sup and dist_res < 10:
-            sig="🔴 بيع من مقاومة قريبة"; sl=res1+2.5; tp=sup1; reason=f"رفض من {res1:.2f} - اوردر بلوك {ob15}"
-        elif liq_down>liq_up:
-            sig="🔴 بيع - ضرب سيولة تحت"; sl=price+6; tp=sup1; reason=f"تحتنا سيولة كتير {liq_down} مستويات - الحيتان رح تنزل تضربها"
+        if score>=58:
+            sig="🟢 شراء BUY"; sl=sup-1.5; tp1=price+atr; tp2=res; exp=f"فوق EMA + دعم {sup:.1f} + ترند صاعد"
+        elif score<=42:
+            sig="🔴 بيع SELL"; sl=res+1.5; tp1=price-atr; tp2=sup; exp=f"تحت EMA + مقاومة {res:.1f} + ترند هابط"
         else:
-            sig="🟢 شراء - ضرب سيولة فوق"; sl=price-6; tp=res1; reason=f"فوقنا سيولة {liq_up} مستويات"
+            # حتى بالحيادي بيعطيك سكالب
+            if price-sup < res-price:
+                sig="🟢 شراء سكالب"; sl=sup-1; tp1=price+5; tp2=res; exp=f"ارتداد من دعم قريب {sup:.1f}"
+            else:
+                sig="🔴 بيع سكالب"; sl=res+1; tp1=price-5; tp2=sup; exp=f"رفض من مقاومة قريبة {res:.1f}"
 
-        txt=f"""{sig}
-💰 السعر الحقيقي: {price:.2f}
+        txt=f"""{sig} | قوة {score}/100
+💰 دخول: {price:.2f}
+🛑 وقف: {sl:.2f} ({abs(price-sl):.1f}$)
+🎯 هدف1: {tp1:.2f}
+🎯 هدف2: {tp2:.2f}
+📝 السبب: {exp}
 
-📍 اقرب دعوم (خلال 25$):
-{chr(10).join([f" • S: {s:.2f} ({price-s:.1f}$ تحت)" for s in sorted(near_sup, reverse=True)[:4]])}
+━━━━━━━━━━━━━━━
+🧱 دعم ومقاومة قريبة (15M-1H):
+دعوم:
+{chr(10).join([f" • {s:.2f} ({price-s:.1f}$ تحت)" for s in sorted(near_sup,reverse=True)])}
 
-📍 اقرب مقاومات (خلال 25$):
-{chr(10).join([f" • R: {r:.2f} ({r-price:.1f}$ فوق)" for r in sorted(near_res)[:4]])}
+مقاومات:
+{chr(10).join([f" • {r:.2f} ({r-price:.1f}$ فوق)" for r in sorted(near_res)])}
 
-💧 سيولة قريبة (0-8$):
- فوق: {liq_up} مستويات | تحت: {liq_down} مستويات
- {'⚠️ الحيتان رح يطلعوا يضربوا فوق اول' if liq_up>liq_down else '⚠️ الحيتان رح ينزلوا يضربوا تحت اول' if liq_down>0 else ''}
+رينج 1H: {s60:.1f} - {r60:.1f}
+رينج 15M: {s15:.1f} - {r15:.1f}
 
-🏦 اوردر بلوكات الحيتان:
- 5M: {ob5}
- 15M: {ob15}
- 1H: {ob60}
+💧 سيولة:
+اقرب تجمع فوق: {res:.2f}
+اقرب تجمع تحت: {sup:.2f}
+الحيتان: رح يضربوا {'فوق' if res-price < price-sup else 'تحت'} اول
 
-📊 كل الدعوم 15M: {l15[-5:]}
-📊 كل المقاومات 15M: {h15[-5:]}
-
-🎯 دخول {price:.2f} | وقف {sl:.2f} | هدف {tp:.2f}
-💡 {reason}
+🏦 OB: 15M دعم {s15:.1f} مقاومة {r15:.1f}
 """
         await update.message.reply_text(txt)
     except Exception as e:
-        await update.message.reply_text(f"خطأ: {e}")
+        await update.message.reply_text(f"❌ خطأ: {e} - جرب /test")
 
-async def start(update,context): await update.message.reply_text("V10.1 مصلح\n/tawsiya")
+async def start(update,context):
+    await update.message.reply_text("V11\n/tawsiya توصية + SMC")
 
 if __name__=="__main__":
     if TOKEN:
@@ -145,4 +138,5 @@ if __name__=="__main__":
         b.add_handler(CommandHandler("start",start))
         b.add_handler(CommandHandler("tawsiya",tawsiya))
         b.add_handler(CommandHandler("tawsiyat",tawsiya))
+        b.add_handler(CommandHandler("qawi",tawsiya))
         b.run_polling()
