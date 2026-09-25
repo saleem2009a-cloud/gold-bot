@@ -1,190 +1,173 @@
-import os, requests, threading, math
+import os, requests, threading
 from flask import Flask
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 app = Flask(__name__)
 @app.route('/')
-def home(): return "V8 7-Directions ULTIMATE Live 🔥"
+def home(): return "V10 SMC Real"
 threading.Thread(target=lambda: app.run(host='0.0.0.0', port=int(os.environ.get("PORT",10000))), daemon=True).start()
 
 TOKEN = os.environ.get("BOT_TOKEN")
 
 def get_price():
-    try: return float(requests.get("https://api.gold-api.com/price/XAU",timeout=5).json()['price'])
+    try: return float(requests.get("https://api.gold-api.com/price/XAU",timeout=4).json()['price'])
     except:
-        try: return float(requests.get("https://api.binance.com/api/v3/ticker/price?symbol=PAXGUSDT",timeout=5).json()['price'])
-        except: return 4290.0
+        try: return float(requests.get("https://api.binance.com/api/v3/ticker/price?symbol=PAXGUSDT",timeout=4).json()['price'])
+        except: return 4305.0
 
-def get_candles(tf, limit=100):
+def get_candles(tf, lim=200):
     for base in ["https://data-api.binance.vision","https://api.binance.com"]:
         try:
-            r=requests.get(f"{base}/api/v3/klines?symbol=PAXGUSDT&interval={tf}&limit={limit}",timeout=6,headers={"User-Agent":"Mozilla/5.0"}).json()
-            if isinstance(r,list) and len(r)>80: return r
+            r=requests.get(f"{base}/api/v3/klines?symbol=PAXGUSDT&interval={tf}&limit={lim}",timeout=7,headers={"User-Agent":"Mozilla/5.0"}).json()
+            if isinstance(r,list) and len(r)>100: return r
         except: pass
     return []
 
-def get_macro():
-    out={}
-    # 1- DXY من EURUSD
-    try:
-        eur=float(requests.get("https://api.binance.com/api/v3/ticker/price?symbol=EURUSDT",timeout=4).json()['price'])
-        out['dxy']= 1.08/eur*103.5
-        out['dxy_trend']="صاعد 🔴 ضد الذهب" if eur<1.08 else "هابط 🟢 مع الذهب"
-    except: out['dxy']=103; out['dxy_trend']="مجهول"
-    # 2- عوائد 10 سنوات من Yahoo
-    try:
-        y=requests.get("https://query1.finance.yahoo.com/v8/finance/chart/%5ETNX?interval=1d&range=1d",timeout=5,headers={"User-Agent":"Mozilla/5.0"}).json()
-        out['tnx']=y['chart']['result'][0]['meta']['regularMarketPrice']
-        out['tnx_trend']="مرتفع 🔴" if out['tnx']>4.2 else "منخفض 🟢"
-    except: out['tnx']=4.0; out['tnx_trend']="مجهول"
-    # 3- خوف وطمع
-    try:
-        f=requests.get("https://api.alternative.me/fng/?limit=1",timeout=4).json()
-        out['fng']=int(f['data'][0]['value']); out['fng_txt']=f['data'][0]['value_classification']
-    except: out['fng']=50; out['fng_txt']="Neutral"
-    # 4- اخبار ذهب
-    try:
-        n=requests.get("https://api.gold-api.com/news",timeout=4).json()
-        out['news']=n[0]['title'][:110] if n else "لا اخبار قوية"
-    except: out['news']="لا اخبار قوية - سوق فني"
-    return out
-
-def ema(p,per):
-    if len(p)<per: return p[-1]
-    k=2/(per+1); e=sum(p[:per])/per
-    for x in p[per:]: e=x*k+e*(1-k)
+def ema(p,n):
+    if len(p)<n: return p[-1]
+    k=2/(n+1); e=sum(p[:n])/n
+    for x in p[n:]: e=x*k+e*(1-k)
     return e
-def rsi(p,per=14):
-    if len(p)<per+1: return 50
-    d=[p[i]-p[i-1] for i in range(1,len(p))][-per:]
-    g=sum([x for x in d if x>0])/per; l=sum([-x for x in d if x<0])/per
-    return 100 if l==0 else 100-(100/(1+g/l))
-def atr(cands,per=14):
-    trs=[]
-    for i in range(1,len(cands)):
-        h=float(cands[i][2]); l=float(cands[i][3]); pc=float(cands[i-1][4])
-        trs.append(max(h-l,abs(h-pc),abs(l-pc)))
-    return sum(trs[-per:])/per if trs else 5
 
-async def start(update,context): await update.message.reply_text("🔥 V8 الوحش 7 اتجاهات\n/tawsiya\n/market\n/news\n/gold")
+def find_swings(candles, lookback=5):
+    # SMC سوينغ هاي ولو حقيقي
+    highs=[]; lows=[]
+    for i in range(lookback, len(candles)-lookback):
+        h=float(candles[i][2]); l=float(candles[i][3])
+        is_high=all(h>float(candles[j][2]) for j in range(i-lookback,i+lookback+1) if j!=i)
+        is_low=all(l<float(candles[j][3]) for j in range(i-lookback,i+lookback+1) if j!=i)
+        if is_high: highs.append((i,h))
+        if is_low: lows.append((i,l))
+    return highs[-10:], lows[-10:]
 
-async def tawsiya(update,context):
-    await update.message.reply_text("💣 عم فجّر 7 اتجاهات... 5 ثواني")
+def find_order_blocks(candles):
+    obs=[]
+    for i in range(len(candles)-5, len(candles)-1):
+        o=float(candles[i][1]); c=float(candles[i][4]); h=float(candles[i][2]); l=float(candles[i][3])
+        next_c=float(candles[i+1][4])
+        # اوردر بلوك صاعد: اخر شمعة حمرا قبل خضرا قوية
+        if c<o and next_c>o and (next_c-o)>(o-l)*1.5:
+            obs.append(("BUY OB", l, o))
+        if c>o and next_c<o and (h-(o))>0:
+            obs.append(("SELL OB", o, h))
+    return obs[-4:]
+
+async def tawsiya(update, context):
+    await update.message.reply_text("🔍 عم ادرس SMC - دعم مقاومة سيولة - 5 ثواني...")
     try:
         price=get_price()
-        macro=get_macro()
-        tf_data={}
-        for tf in ["5m","15m","1h","4h","1d"]:
-            c=get_candles(tf,120)
-            if len(c)>80:
-                closes=[float(x[4]) for x in c]
-                tf_data[tf]={"c":closes,"e50":ema(closes,50),"e200":ema(closes,200),"rsi":rsi(closes),"atr":atr(c),"cands":c}
+        c1h=get_candles("1h",200)
+        c4h=get_candles("4h",200)
+        c15=get_candles("15m",200)
+        c5=get_candles("5m",100)
 
-        if "5m" not in tf_data: await update.message.reply_text("❌ بينانس معلق"); return
+        if len(c1h)<100: await update.message.reply_text("❌ بينانس معلق"); return
 
-        score=50; reasons=[]; details=[]
+        # 1- سوينغات
+        highs_1h, lows_1h = find_swings(c1h, 5)
+        highs_4h, lows_4h = find_swings(c4h, 3)
 
-        # 1- فني
-        for tf,w in [("1d",25),("4h",20),("1h",20),("15m",10),("5m",15)]:
-            if tf not in tf_data: continue
-            d=tf_data[tf]
-            if d["c"][-1]>d["e50"] and d["c"][-1]>d["e200"]: score+=w*0.45; reasons.append(f"✅ {tf} فوق 50+200")
-            elif d["c"][-1]>d["e50"]: score+=w*0.15; reasons.append(f"⚠️ {tf} فوق 50")
-            else: score-=w*0.4; reasons.append(f"🔴 {tf} تحت 50")
-            details.append(f"{tf} RSI {d['rsi']:.0f}")
+        # 2- اقوى دعم ومقاومة (اخر 5 سوينغات)
+        supports=sorted([l for _,l in lows_1h+lows_4h])[:5]
+        resistances=sorted([h for _,h in highs_1h+highs_4h], reverse=True)[:5]
 
-        # 2- DXY
-        if macro['dxy']>104: score-=12; reasons.append(f"🔴 دولار قوي {macro['dxy']:.1f} {macro['dxy_trend']}")
-        else: score+=8; reasons.append(f"🟢 دولار ضعيف {macro['dxy']:.1f} {macro['dxy_trend']}")
+        strong_sup = supports[0] if supports else price-15
+        strong_res = resistances[0] if resistances else price+15
+        nearest_sup = max([s for s in supports if s < price], default=strong_sup)
+        nearest_res = min([r for r in resistances if r > price], default=strong_res)
 
-        # 3- عوائد
-        if macro['tnx']>4.3: score-=10; reasons.append(f"🔴 عوائد 10س {macro['tnx']:.2f}% {macro['tnx_trend']} - ضغط ذهب")
-        else: score+=8; reasons.append(f"🟢 عوائد {macro['tnx']:.2f}% {macro['tnx_trend']} - دعم ذهب")
+        # 3- اوردر بلوكات
+        ob_1h=find_order_blocks(c1h)
+        ob_15=find_order_blocks(c15)
 
-        # 4- خوف وطمع
-        if macro['fng']<25: score+=10; reasons.append(f"🟢 خوف شديد {macro['fng']} {macro['fng_txt']} = فرصة شراء ذهب")
-        elif macro['fng']>75: score-=7; reasons.append(f"⚠️ طمع شديد {macro['fng']} {macro['fng_txt']}")
+        # 4- سيولة - وين الستوبات مجمعة
+        # سيولة فوق = ستوبات البائعين - سيولة تحت = ستوبات المشترين
+        liquidity_up = [r for r in resistances if abs(r-price)<25]
+        liquidity_down = [s for s in supports if abs(s-price)<25]
 
-        # 5- SMC سيولة
-        high_1h=max([float(x[2]) for x in tf_data["1h"]["cands"][-20:]]) if "1h" in tf_data else price+10
-        low_1h=min([float(x[3]) for x in tf_data["1h"]["cands"][-20:]]) if "1h" in tf_data else price-10
-        # 6- ATR
-        atr5=tf_data["5m"]["atr"]
+        # 5- بريميوم / ديسكاونت
+        range_4h_high = max([float(x[2]) for x in c4h[-50:]])
+        range_4h_low = min([float(x[3]) for x in c4h[-50:]])
+        range_mid = (range_4h_high+range_4h_low)/2
+        zone = "بريميوم 🔴 (غالي - دور بيع)" if price>range_mid else "ديسكاونت 🟢 (رخيص - دور شراء)"
 
-        r5=tf_data["5m"]["rsi"]; r60=tf_data.get("1h",tf_data["5m"])["rsi"]; r240=tf_data.get("4h",tf_data["5m"])["rsi"]
+        # 6- FVG
+        closes_1h=[float(x[4]) for x in c1h]
+        e50=ema(closes_1h,50); e200=ema(closes_1h,200)
+        trend = "صاعد" if closes_1h[-1]>e50 and e50>e200 else "هابط" if closes_1h[-1]<e50 else "عرضي"
 
-        # قرار
-        if score>=78:
-            txt=f"""🟢💎 **شراء خارق متفجر {score:.0f}/100** 🔥🔥🔥
-💵 دخول {price:.2f}
-🛑 وقف {price-atr5*1.2:.2f}
-🎯 هدف1 {price+atr5*1.0:.2f}
-🎯 هدف2 {price+atr5*2.5:.2f}
-🎯 هدف3 {price+atr5*4:.2f}
+        # 7- قرار SMC
+        dist_sup = price-nearest_sup
+        dist_res = nearest_res-price
 
-📊 **7 اتجاهات:**
-{chr(10).join(reasons[:7])}
-
-💧 SMC: دعم {low_1h:.2f} مقاومة {high_1h:.2f}
-📈 RSI: 5M {r5:.0f} 1H {r60:.0f} 4H {r240:.0f} | ATR {atr5:.1f}
-🌍 DXY {macro['dxy']:.1f} | عوائد {macro['tnx']:.2f}% | خوف {macro['fng']} {macro['fng_txt']}
-📰 {macro['news']}
-"""
-        elif score>=60:
-            txt=f"""🟢 **شراء {score:.0f}/100**
-دخول {price:.2f} وقف {price-atr5*1.0:.2f} هدف {price+atr5*1.8:.2f}
-{chr(10).join(reasons[:6])}
-RSI {r5:.0f}/{r60:.0f}/{r240:.0f} | DXY {macro['dxy']:.1f} | {macro['news'][:70]}
-"""
-        elif score<=22:
-            txt=f"""🔴💎 **بيع خارق متفجر {score:.0f}/100** 🔥🔥🔥
-💵 دخول {price:.2f}
-🛑 وقف {price+atr5*1.2:.2f}
-🎯 هدف1 {price-atr5*1.0:.2f}
-🎯 هدف2 {price-atr5*2.5:.2f}
-🎯 هدف3 {price-atr5*4:.2f}
-
-📊 **7 اتجاهات:**
-{chr(10).join(reasons[:7])}
-
-💧 SMC: دعم {low_1h:.2f} مقاومة {high_1h:.2f}
-📈 RSI: 5M {r5:.0f} 1H {r60:.0f} 4H {r240:.0f} | ATR {atr5:.1f}
-🌍 DXY {macro['dxy']:.1f} | عوائد {macro['tnx']:.2f}% | خوف {macro['fng']}
-📰 {macro['news']}
-"""
-        elif score<=40:
-            txt=f"""🔴 **بيع {score:.0f}/100**
-دخول {price:.2f} وقف {price+atr5*1.0:.2f} هدف {price-atr5*1.8:.2f}
-{chr(10).join(reasons[:6])}
-RSI {r5:.0f}/{r60:.0f}/{r240:.0f} | DXY {macro['dxy']:.1f}
-"""
+        if zone.startswith("ديسكاونت") and dist_sup<8 and trend!="هابط":
+            sig="🟢 **شراء SMC من دعم**"; sl=nearest_sup-3; tp1=range_mid; tp2=strong_res; reason=f"السعر بديسكاونت + قريب من دعم قوي {nearest_sup:.1f} + ترند {trend}"
+        elif zone.startswith("بريميوم") and dist_res<8 and trend!="صاعد":
+            sig="🔴 **بيع SMC من مقاومة**"; sl=nearest_res+3; tp1=range_mid; tp2=strong_sup; reason=f"السعر ببريميوم + قريب من مقاومة {nearest_res:.1f} + ترند {trend}"
+        elif dist_res < dist_sup:
+            sig="🔴 **بيع سكالب - سيولة فوق**"; sl=nearest_res+2; tp1=price-8; tp2=nearest_sup; reason=f"اقرب سيولة فوق {nearest_res:.1f} الحيتان رح تضرب ستوبات البائعين فوق"
         else:
-            txt=f"""⏸️ **حيادي {score:.0f}/100 - سوق ملخبط لا تدخل**
+            sig="🟢 **شراء سكالب - سيولة تحت**"; sl=nearest_sup-2; tp1=price+8; tp2=nearest_res; reason=f"اقرب سيولة تحت {nearest_sup:.1f} الحيتان رح تضرب ستوبات المشترين تحت"
 
-السعر {price:.2f} | SMC {low_1h:.0f}-{high_1h:.0f}
-{chr(10).join(reasons[:6])}
-RSI {r5:.1f}/{r60:.1f}/{r240:.1f} ATR {atr5:.1f}
-🌍 DXY {macro['dxy']:.1f} {macro['dxy_trend']}
-💵 عوائد {macro['tnx']:.2f}% {macro['tnx_trend']}
-😨 خوف وطمع {macro['fng']} {macro['fng_txt']}
-📰 {macro['news']}
+        txt=f"""{sig}
 
-💡 انتظر كسر {high_1h:.0f} او {low_1h:.0f}
+💰 السعر هلا: {price:.2f}
+📍 المنطقة: {zone}
+📈 ترند 1H: {trend} (50: {e50:.1f} | 200: {e200:.1f})
+
+━━━━━━━━━━━━━━━
+💧 **السيولة - وين الستوبات:**
+
+🔴 سيولة فوق (ستوب البائعين):
+{chr(10).join([f" • {r:.2f} ({r-price:.1f}$ فوق)" for r in liquidity_up[:3]]) if liquidity_up else " • مافي سيولة قريبة فوق"}
+
+🟢 سيولة تحت (ستوب المشترين):
+{chr(10).join([f" • {s:.2f} ({price-s:.1f}$ تحت)" for s in liquidity_down[:3]]) if liquidity_down else " • مافي سيولة قريبة تحت"}
+
+━━━━━━━━━━━━━━━
+🧱 **الدعم والمقاومة الحقيقية SMC:**
+
+مقاومات:
+{chr(10).join([f" R{i+1}: {r:.2f}" for i,r in enumerate(resistances[:4])])}
+
+دعوم:
+{chr(10).join([f" S{i+1}: {s:.2f}" for i,s in enumerate(sorted(supports)[:4])])}
+
+اقرب دعم: {nearest_sup:.2f} ({dist_sup:.1f}$ تحت)
+اقرب مقاومة: {nearest_res:.2f} ({dist_res:.1f}$ فوق)
+رينج 4H: {range_4h_low:.1f} - {range_4h_high:.1f} | النص {range_mid:.1f}
+
+━━━━━━━━━━━━━━━
+🏦 **اوردر بلوك الحيتان:**
+1H: {ob_1h[-1] if ob_1h else "مافي OB واضح"}
+15M: {ob_15[-1] if ob_15 else "مافي OB واضح"}
+
+━━━━━━━━━━━━━━━
+🎯 **الصفقة المقترحة SMC:**
+دخول: {price:.2f}
+وقف: {sl:.2f}
+هدف1: {tp1:.2f}
+هدف2: {tp2:.2f}
+السبب: {reason}
+
+💡 الحيتان هلا رح يروحوا يضربوا {'السيولة فوق' if dist_res<dist_sup else 'السيولة تحت'} اول
 """
         await update.message.reply_text(txt)
     except Exception as e:
-        await update.message.reply_text(f"❌ خطأ V8: {e}")
+        await update.message.reply_text(f"❌ خطأ SMC: {e}")
 
-async def market(update,context):
-    m=get_macro(); p=get_price()
-    await update.message.reply_text(f"🌍 **سوق 7 اتجاهات:**\nذهب {p:.2f}\nDXY {m['dxy']:.1f} {m['dxy_trend']}\nعوائد 10س {m['tnx']:.2f}% {m['tnx_trend']}\nخوف {m['fng']} {m['fng_txt']}\n📰 {m['news']}")
+async def start(update,context):
+    await update.message.reply_text("V10 SMC الحقيقي 🧱\n/tawsiya - تحليل دعم مقاومة سيولة\n/gold - سعر")
+
+async def gold(update,context):
+    await update.message.reply_text(f"💰 {get_price():.2f}")
 
 if __name__=="__main__":
     if TOKEN:
-        bot=Application.builder().token(TOKEN).build()
-        bot.add_handler(CommandHandler("start",start))
-        bot.add_handler(CommandHandler("tawsiya",tawsiya))
-        bot.add_handler(CommandHandler("tawsiyat",tawsiya))
-        bot.add_handler(CommandHandler("market",market))
-        bot.run_polling()
+        b=Application.builder().token(TOKEN).build()
+        b.add_handler(CommandHandler("start",start))
+        b.add_handler(CommandHandler("tawsiya",b.add_handler if False else tawsiya))
+        b.add_handler(CommandHandler("tawsiyat",tawsiya))
+        b.add_handler(CommandHandler("gold",gold))
+        b.run_polling()
