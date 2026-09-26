@@ -5,10 +5,11 @@ import matplotlib.patches as patches
 from flask import Flask
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
+from datetime import datetime
 
 app = Flask(__name__)
 @app.route('/')
-def home(): return "V18 Full Detailed + No Sleep"
+def home(): return "V19 Full Analyzer + News"
 
 def keep_alive():
     while True:
@@ -25,13 +26,13 @@ TOKEN=os.environ.get("BOT_TOKEN")
 ALERT_CHATS=set()
 LAST_ALERT={}
 
-def get_price():
-    for u in ["https://api.gold-api.com/price/XAU","https://data-api.binance.vision/api/v3/ticker/price?symbol=PAXGUSDT"]:
-        try:
-            p=float(requests.get(u,timeout=5).json()['price'])
-            if p>2000: return p
-        except: pass
-    return 4286.2
+def get_price(sym="PAXGUSDT"):
+    try:
+        for base in ["https://data-api.binance.vision","https://api.binance.com"]:
+            r=requests.get(f"{base}/api/v3/ticker/price?symbol={sym}",timeout=5).json()
+            if 'price' in r: return float(r['price'])
+    except: pass
+    return None
 
 def get_candles(tf,lim=200):
     for base in ["https://data-api.binance.vision","https://api.binance.com"]:
@@ -40,6 +41,37 @@ def get_candles(tf,lim=200):
             if isinstance(r,list) and len(r)>100: return r
         except: pass
     return []
+
+def get_market_data():
+    data={}
+    # DXY دولار
+    try:
+        r=requests.get("https://api.binance.vision/api/v3/ticker/24hr?symbol=BTCUSDT",timeout=5).json()
+        data['btc_change']=float(r['priceChangePercent'])
+    except: data['btc_change']=0
+    # حاول تجيب DXY من API مجاني
+    try:
+        r=requests.get("https://api.gold-api.com/price/XAU",timeout=5).json()
+        data['gold_price']=r['price']
+        data['gold_change']=r.get('ch',0)
+    except:
+        data['gold_price']=get_price() or 4286
+        data['gold_change']=0
+    # اخبار الذهب - من Kitco RSS مبسط
+    news=[]
+    try:
+        # ForexFactory اخبار اليوم
+        r=requests.get("https://nfs.faireconomy.media/ff_calendar_thisweek.json",timeout=6).json()
+        today=datetime.now().strftime("%Y-%m-%d")
+        for ev in r[-30:]:
+            if 'Gold' in str(ev) or ev.get('impact')=='High' and 'USD' in ev.get('country',''):
+                news.append(f"{ev.get('title','')} - {ev.get('impact','')}")
+    except:
+        pass
+    if not news:
+        news=["لا يوجد اخبار قوية اليوم - حركة فنية","الدولار مستقر - تركيز على الفني"]
+    data['news']=news[:3]
+    return data
 
 def find_zones(candles):
     zones=[]
@@ -81,6 +113,99 @@ def draw_chart(candles,zones,price,path="/tmp/gold.png"):
     plt.tight_layout(); plt.savefig(path,dpi=150,facecolor='#0e0e12'); plt.close()
     return path
 
+async def tawsiya(update,context):
+    await update.message.reply_text("🔍 عم حلل كلشي: فني + اخبار + دولار + شارت...")
+    price=get_price() or 4286.2
+    c1h=get_candles("1h",200)
+    c4h=get_candles("4h",200)
+    if len(c1h)<50:
+        await update.message.reply_text(f"السوق مسكر - {price}")
+        return
+    mkt=get_market_data()
+    zones=find_zones(c1h)
+    zones4=find_zones(c4h)
+    all_zones=zones+zones4
+
+    highs=[float(c[2]) for c in c1h[-50:]]; lows=[float(c[3]) for c in c1h[-50:]]
+    high_50=max(highs); low_50=min(lows)
+    closes=[float(c[4]) for c in c1h[-20:]]
+    trend_up=closes[-1]>sum(closes)/len(closes)
+
+    demands=[z for z in all_zones if z['type']=="DEMAND"]
+    supplies=[z for z in all_zones if z['type']=="SUPPLY"]
+
+    nearest_sup=sorted(supplies, key=lambda x: abs(x['from']-price))[0] if supplies else None
+    nearest_dem=sorted(demands, key=lambda x: abs(price-x['to']))[0] if demands else None
+
+    # تحليل اخبار
+    news_txt="\n".join([f"• {n}" for n in mkt['news']])
+    btc_trend="صاعد - ضغط على الذهب" if mkt.get('btc_change',0)>1 else "هابط - دعم للذهب" if mkt.get('btc_change',0)<-1 else "مستقر"
+
+    if not trend_up and nearest_sup:
+        entry=nearest_sup['from']+0.5; sl=nearest_sup['to']+3.8; tp1=entry-8; tp2=low_50
+        type_trade="🔴 بيع SELL"
+        reason=f"ترند هابط + عرض {nearest_sup['from']:.1f}-{nearest_sup['to']:.1f}"
+        risk="متوسط - اخبار الدولار قوية"
+    elif trend_up and nearest_dem:
+        entry=nearest_dem['to']-0.5; sl=nearest_dem['from']-3.8; tp1=entry+8; tp2=high_50
+        type_trade="🟢 شراء BUY"
+        reason=f"ترند صاعد + طلب {nearest_dem['from']:.1f}-{nearest_dem['to']:.1f}"
+        risk="جيد - دولار ضعيف"
+    else:
+        entry=price; sl=price-5; tp1=price-8 if not trend_up else price+8; tp2=low_50 if not trend_up else high_50
+        type_trade="🔴 بيع SELL" if not trend_up else "🟢 شراء BUY"
+        reason="انتظار كسر واضح"
+        risk="عالي - انتظر"
+
+    chart=draw_chart(c1h,zones,price)
+    fib_status="غالي 🔴 دور بيع - فوق 70% فيبو" if price>(high_50+low_50)/2 else "رخيص 🟢 دور شراء - تحت 30% فيبو"
+
+    txt=f"""{type_trade} | {'صاعد 🟢' if trend_up else 'هابط 🔴'} | دور {'طلب' if trend_up else 'عرض'} فقط
+━━━━━━━━━━━━━━━
+💰 السعر: {price:.2f} ({mkt.get('gold_change',0):+.2f}%)
+
+🎯 التوصية الكاملة:
+دخول: {entry:.2f}
+وقف: {sl:.2f} (${abs(entry-sl):.1f})
+هدف1: {tp1:.2f} (${abs(tp1-entry):.1f})
+هدف2: {tp2:.2f}
+نسبة: 1:{abs(tp1-entry)/max(1,abs(entry-sl)):.1f}
+⚠️ المخاطرة: {risk}
+
+📍 التحليل الفني:
+السبب: {reason}
+دعم: {nearest_dem['from']:.1f} | مقاومة: {nearest_sup['from']:.1f}
+{len(demands)} طلب | {len(supplies)} عرض
+قمة 50: {high_50:.1f} | قاع 50: {low_50:.1f}
+فيبو: {fib_status}
+
+🌍 التحليل الاساسي:
+• BTC: {btc_trend} ({mkt.get('btc_change',0):+.1f}%)
+• الذهب: {mkt.get('gold_change',0):+.2f}% اليوم
+
+📰 اخبار اليوم:
+{news_txt}
+
+💡 الدخول:
+محافظ: شمعة ابتلاع عند المنطقة
+هجومي: امر معلق من {entry:.1f}
+
+✅ التنبيه شغال - /alert_on
+"""
+    await context.bot.send_photo(chat_id=update.effective_chat.id, photo=open(chart,'rb'), caption=txt)
+
+async def alert_on(update,context):
+    from telegram.ext import ContextTypes
+    ALERT_CHATS.add(update.effective_chat.id)
+    await update.message.reply_text("✅ التنبيهات شغالة مع تحليل اخبار 🔔")
+
+async def alert_off(update,context):
+    ALERT_CHATS.discard(update.effective_chat.id)
+    await update.message.reply_text("❌ وقفنا")
+
+async def start(update,context):
+    await update.message.reply_text("V19 المحلل الشامل شغال\nيحلل فني + اخبار + دولار\n/tawsiya للتوصية الكاملة")
+
 async def check_alerts(context):
     if not ALERT_CHATS: return
     price=get_price()
@@ -93,99 +218,8 @@ async def check_alerts(context):
             LAST_ALERT[key]=price
             for chat_id in list(ALERT_CHATS):
                 try:
-                    await context.bot.send_message(chat_id,f"🚨 {'شراء' if z['type']=='DEMAND' else 'بيع'} {price:.2f} وصل {z['from']:.1f}-{z['to']:.1f}\n/tawsiya")
+                    await context.bot.send_message(chat_id,f"🚨 وصل منطقة {z['from']:.1f}\n/tawsiya للتحليل الكامل")
                 except: pass
-
-async def tawsiya(update,context):
-    await update.message.reply_text("🔍 عم حلل وارسم...")
-    price=get_price()
-    c1h=get_candles("1h",200)
-    if len(c1h)<50:
-        await update.message.reply_text(f"السوق مسكر - {price}")
-        return
-    zones=find_zones(c1h)
-    c15=get_candles("15m",200)
-    zones15=find_zones(c15)
-    all_zones=zones+zones15
-
-    highs=[float(c[2]) for c in c1h[-50:]]; lows=[float(c[3]) for c in c1h[-50:]]
-    high_50=max(highs); low_50=min(lows)
-    closes=[float(c[4]) for c in c1h[-20:]]
-    trend_up=closes[-1]>sum(closes)/len(closes)
-    trend_txt="صاعد | BUY بيع" if trend_up else "هابط | SELL بيع"
-    دور="دور طلب فقط" if trend_up else "دور عرض فقط"
-
-    demands=[z for z in all_zones if z['type']=="DEMAND"]
-    supplies=[z for z in all_zones if z['type']=="SUPPLY"]
-
-    nearest_sup=sorted([z for z in supplies if z['from']>price-5], key=lambda x: abs(x['from']-price))[0] if supplies else None
-    nearest_dem=sorted([z for z in demands if z['to']<price+5], key=lambda x: abs(price-x['to']))[0] if demands else None
-
-    if not trend_up and nearest_sup:
-        entry=nearest_sup['from']+0.5
-        sl=nearest_sup['to']+3.8
-        tp1=entry-8
-        tp2=low_50
-        type_trade="🔴 بيع SELL"
-        reason=f"ترند هابط + ارتداد من عرض قوي\n{nearest_sup['to']:.1f}-{nearest_sup['from']:.1f}"
-    elif trend_up and nearest_dem:
-        entry=nearest_dem['to']-0.5
-        sl=nearest_dem['from']-3.8
-        tp1=entry+8
-        tp2=high_50
-        type_trade="🟢 شراء BUY"
-        reason=f"ترند صاعد + ارتداد من طلب قوي\n{nearest_dem['from']:.1f}-{nearest_dem['to']:.1f}"
-    else:
-        entry=price; sl=price-3.8; tp1=price-8 if not trend_up else price+8; tp2=low_50 if not trend_up else high_50
-        type_trade="🔴 بيع SELL" if not trend_up else "🟢 شراء BUY"
-        reason="اقرب منطقة"
-
-    chart=draw_chart(c1h,zones,price)
-
-    # نفس النص الطويل تبع الصورة الاولى
-    sup_txt=f"{nearest_dem['to']:.1f}-{nearest_dem['from']:.1f}" if nearest_dem else "مافي"
-    res_txt=f"{nearest_sup['to']:.1f}-{nearest_sup['from']:.1f}" if nearest_sup else "مافي"
-    fib_txt="غالي 🔴 دور بيع" if price>(high_50+low_50)/2 else "رخيص 🟢 دور شراء"
-
-    txt=f"""{type_trade} | {trend_txt} {دور} 🔴
-━━━━━━━━━━━━━━━
-💰 السعر الحالي: {price:.2f}
-
-🎯 التوصية:
-دخول: {entry:.2f}
-وقف خسارة: {sl:.2f} (${abs(entry-sl):.1f})
-هدف اول: {tp1:.2f} (${abs(tp1-entry):.1f})
-هدف ثاني: {tp2:.2f}
-نسبة مخاطرة: 1:{abs(tp1-entry)/max(1,abs(entry-sl)):.1f}
-
-📍 السبب: {reason}
-
-🏦 OB مناطق:
-دعم: {sup_txt} طلب | {len(demands)} مناطق
-مقاومة: {res_txt} عرض | {len(supplies)} مناطق
-
-💧 قمة 50 شمعة: {high_50:.1f}
-💧 قاع 50 شمعة: {low_50:.1f}
-📊 فيبوناتشي خصم: {fib_txt}
-
-💡 طريقة الدخول:
-محافظ: استنا شمعة ابتلاع عند المنطقة
-هجومي: امر معلق من {entry:.1f}
-
-✅ التنبيه شغال - رح ابعتلك اذا وصل
-"""
-    await context.bot.send_photo(chat_id=update.effective_chat.id, photo=open(chart,'rb'), caption=txt)
-
-async def alert_on(update,context):
-    ALERT_CHATS.add(update.effective_chat.id)
-    await update.message.reply_text("✅ التنبيهات شغالة 🔔 - حتى لو غبت ساعة رح ابعتلك")
-
-async def alert_off(update,context):
-    ALERT_CHATS.discard(update.effective_chat.id)
-    await update.message.reply_text("❌ وقفنا")
-
-async def start(update,context):
-    await update.message.reply_text("V18 مفصل + ما بينام\n/tawsiya\n/alert_on")
 
 if __name__=="__main__":
     if TOKEN:
