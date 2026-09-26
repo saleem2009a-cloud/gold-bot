@@ -1,4 +1,4 @@
-import os, requests, threading, matplotlib
+import os, requests, threading, time, matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
@@ -8,7 +8,21 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 
 app = Flask(__name__)
 @app.route('/')
-def home(): return "V16 Full Tawsiya"
+def home(): return "V17 Final - No Sleep"
+
+# هاد بخلي البوت ما ينام
+def keep_alive():
+    while True:
+        try:
+            url = os.environ.get("RENDER_EXTERNAL_URL")
+            if url:
+                requests.get(url, timeout=10)
+            else:
+                requests.get(f"http://localhost:{os.environ.get('PORT',10000)}", timeout=5)
+        except: pass
+        time.sleep(240)
+
+threading.Thread(target=keep_alive, daemon=True).start()
 threading.Thread(target=lambda: app.run(host='0.0.0.0', port=int(os.environ.get("PORT",10000))), daemon=True).start()
 
 TOKEN = os.environ.get("BOT_TOKEN")
@@ -18,7 +32,7 @@ LAST_ALERT={}
 def get_price():
     for u in ["https://api.gold-api.com/price/XAU","https://data-api.binance.vision/api/v3/ticker/price?symbol=PAXGUSDT"]:
         try:
-            p=float(requests.get(u,timeout=4).json()['price'])
+            p=float(requests.get(u,timeout=5).json()['price'])
             if p>2000: return p
         except: pass
     return 4286.2
@@ -76,6 +90,7 @@ async def check_alerts(context: ContextTypes.DEFAULT_TYPE):
     if not ALERT_CHATS: return
     price=get_price()
     c1h=get_candles("1h",200)
+    if len(c1h)<50: return
     zones=find_zones(c1h)
     for z in zones:
         if z['from']-3 <= price <= z['to']+3:
@@ -98,87 +113,55 @@ async def tawsiya(update, context):
     zones=find_zones(c1h)
     zones15=find_zones(c15)
     all_zones=zones+zones15
-
-    # تحليل
     highs=[float(c[2]) for c in c1h[-50:]]; lows=[float(c[3]) for c in c1h[-50:]]
     high_50=max(highs); low_50=min(lows)
     closes=[float(c[4]) for c in c1h[-20:]]
     trend_up=closes[-1]>sum(closes)/len(closes)
     trend_txt="صاعد 🟢 دور طلب فقط" if trend_up else "هابط 🔴 دور عرض فقط"
-
     demands=[z for z in all_zones if z['type']=="DEMAND"]
     supplies=[z for z in all_zones if z['type']=="SUPPLY"]
     nearest_sup=sorted([z for z in supplies if z['from']>price], key=lambda x: x['from']-price)[0] if [z for z in supplies if z['from']>price] else None
     nearest_dem=sorted([z for z in demands if z['to']<price], key=lambda x: price-x['to'])[0] if [z for z in demands if z['to']<price] else None
-
-    # توصية حسب الصورة
     if trend_up and nearest_dem:
         entry=nearest_dem['to']; sl=nearest_dem['from']-2.5; tp1=entry+8; tp2=high_50; type_trade="🟢 شراء BUY"
-        reason=f"ترند صاعد + ارتداد من طلب قوي {nearest_dem['from']:.1f}-{nearest_dem['to']:.1f}"
+        reason=f"ترند صاعد + طلب {nearest_dem['from']:.1f}-{nearest_dem['to']:.1f}"
     elif not trend_up and nearest_sup:
         entry=nearest_sup['from']; sl=nearest_sup['to']+2.5; tp1=entry-8; tp2=low_50; type_trade="🔴 بيع SELL"
-        reason=f"ترند هابط + ارتداد من عرض قوي {nearest_sup['from']:.1f}-{nearest_sup['to']:.1f}"
+        reason=f"ترند هابط + عرض {nearest_sup['from']:.1f}-{nearest_sup['to']:.1f}"
     else:
-        if nearest_dem and nearest_sup:
-            if abs(price-nearest_dem['to']) < abs(price-nearest_sup['from']):
-                entry=nearest_dem['to']; sl=nearest_dem['from']-2.5; tp1=entry+8; tp2=high_50; type_trade="🟢 شراء سكالب"
-                reason="اقرب طلب"
-            else:
-                entry=nearest_sup['from']; sl=nearest_sup['to']+2.5; tp1=entry-8; tp2=low_50; type_trade="🔴 بيع سكالب"
-                reason="اقرب عرض"
-        elif nearest_dem:
-            entry=nearest_dem['to']; sl=nearest_dem['from']-2.5; tp1=entry+8; tp2=high_50; type_trade="🟢 شراء"
-            reason="طلب فقط"
+        if nearest_dem and (not nearest_sup or abs(price-nearest_dem['to']) < abs(price-nearest_sup['from'])):
+            entry=nearest_dem['to']; sl=nearest_dem['from']-2.5; tp1=entry+8; tp2=high_50; type_trade="🟢 شراء سكالب"
+            reason="اقرب طلب"
         elif nearest_sup:
-            entry=nearest_sup['from']; sl=nearest_sup['to']+2.5; tp1=entry-8; tp2=low_50; type_trade="🔴 بيع"
-            reason="عرض فقط"
+            entry=nearest_sup['from']; sl=nearest_sup['to']+2.5; tp1=entry-8; tp2=low_50; type_trade="🔴 بيع سكالب"
+            reason="اقرب عرض"
         else:
             entry=price; sl=price-10; tp1=price+10; tp2=price+20; type_trade="⏸️ انتظار"
-            reason="مافي مناطق قريبة - انتظر كسر"
-
-    # رسم
+            reason="مافي مناطق قريبة"
     chart=draw_chart(c1h, zones, price)
-
     txt=f"""{type_trade} | {trend_txt}
 ━━━━━━━━━━━━━━━
-💰 السعر الحالي: {price:.2f}
-
-🎯 التوصية:
-دخول: {entry:.2f}
-وقف خسارة: {sl:.2f} ({abs(entry-sl):.1f}$)
-هدف اول: {tp1:.2f} ({abs(tp1-entry):.1f}$)
-هدف ثاني: {tp2:.2f}
-نسبة مخاطرة: 1:{abs(tp1-entry)/abs(entry-sl):.1f}
-
+💰 السعر: {price:.2f}
+🎯 دخول: {entry:.2f}
+وقف: {sl:.2f} ({abs(entry-sl):.1f}$)
+هدف1: {tp1:.2f} ({abs(tp1-entry):.1f}$)
+هدف2: {tp2:.2f}
+نسبة: 1:{abs(tp1-entry)/max(1,abs(entry-sl)):.1f}
 📍 السبب: {reason}
-
-🏦 OB مناطق:
-دعم: {nearest_dem['from']:.1f}-{nearest_dem['to']:.1f} طلب | {len(demands)} مناطق
-مقاومة: {nearest_sup['from']:.1f}-{nearest_sup['to']:.1f} عرض | {len(supplies)} مناطق
-
-💧 قمة 50 شمعة: {high_50:.1f}
-💧 قاع 50 شمعة: {low_50:.1f}
-📊 فيبوناتشي خصم: {'رخيص 🟢 دور شراء' if price < (high_50+low_50)/2 else 'غالي 🔴 دور بيع'}
-
-💡 طريقة الدخول:
-محافظ: استنا شمعة ابتلاع عند المنطقة
-هجومي: امر معلق من {entry:.1f}
-
-✅ التنبيه شغال - رح ابعتلك اذا وصل
+🏦 دعم: {nearest_dem['from']:.1f} | مقاومة: {nearest_sup['from']:.1f} | {len(demands)} طلب {len(supplies)} عرض
 """
-
     await context.bot.send_photo(chat_id=update.effective_chat.id, photo=open(chart,'rb'), caption=txt)
 
 async def alert_on(update, context):
     ALERT_CHATS.add(update.effective_chat.id)
-    await update.message.reply_text("✅ التنبيهات شغالة 🔔\nرح ابعتلك توصية كاملة كل ما يوصل منطقة\nالسوق بفتح الاحد 11 ليلا")
+    await update.message.reply_text("✅ التنبيهات شغالة 🔔 - حتى لو غبت ساعة رح ابعتلك")
 
 async def alert_off(update, context):
     ALERT_CHATS.discard(update.effective_chat.id)
     await update.message.reply_text("❌ وقفنا")
 
 async def start(update,context):
-    await update.message.reply_text("V16 توصية + شارت\n/tawsiya - توصية كاملة\n/alert_on - تنبيه تلقائي")
+    await update.message.reply_text("V17 النهائي شغال ✅\n/tawsiya - توصية + شارت\n/alert_on - شغل تنبيه\n/alert_off - وقف")
 
 if __name__=="__main__":
     if TOKEN:
