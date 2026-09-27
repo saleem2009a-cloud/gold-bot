@@ -39,7 +39,10 @@ def run_http_server():
 
 def is_market_open():
     weekday = datetime.now(timezone.utc).weekday()
-    if weekday in [5, 6]:
+    # يعتبر السوق مغلقاً فقط في السبت (5) والأحد حتى وقت محدد، أما الاثنين فالسوق مفتوح دائماً
+    if weekday == 5: 
+        return False
+    if weekday == 6 and datetime.now(timezone.utc).hour < 22:
         return False
     return True
 
@@ -49,7 +52,6 @@ def get_realtime_gold_price():
         if "rates" in res and "USD" in res["rates"]:
             price = 1 / res["rates"]["USD"]
             if 1500 < price < 5000:
-                # تصحيح الفارق ليتطابق مع منصات التداول الحية (إضافة 16 دولاراً حسب مطابقتك الحالية)
                 return round(price + 16.0, 2)
     except Exception:
         pass
@@ -58,7 +60,7 @@ def get_realtime_gold_price():
 def generate_market_dataframe(current_price):
     dates = pd.date_range(end=datetime.now(), periods=30, freq='15min')
     prices = [current_price + (i * 0.2) - 3 for i in range(30)]
-    prices[-1] = current_price  # السعر الحالي بدقة متطابقة
+    prices[-1] = current_price
     
     df = pd.DataFrame({
         'Open': [p - 0.5 for p in prices],
@@ -158,7 +160,7 @@ def telegram_listener():
                             reply = get_live_market_status()
                             send_telegram_message(reply)
                         elif msg_text in ["/start", "مرحبا", "هلا", "شغال"]:
-                            send_telegram_message("أهلاً بك! تم ضبط مطابقة الأسعار مع المنصة بنجاح.")
+                            send_telegram_message("أهلاً بك! السوق مفتوح والبوت يعمل بكفاءة.")
         except Exception:
             pass
         time.sleep(1)
@@ -167,7 +169,7 @@ if __name__ == "__main__":
     threading.Thread(target=run_http_server, daemon=True).start()
     threading.Thread(target=telegram_listener, daemon=True).start()
 
-    send_telegram_message("✅ تم تحديث البوت وضبط تطابق السعر مع المنصة بنجاح!")
+    send_telegram_message("🟢 **السوق مفتوح الآن وتم تفعيل المراقبة اللحظية للاتصال والتوصيات!**")
 
     last_trade_time = 0
 
