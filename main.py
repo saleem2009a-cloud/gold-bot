@@ -1,15 +1,15 @@
-import os, requests, threading, time, matplotlib
+import os, requests, threading, time, matplotlib, math
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from flask import Flask
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
-from datetime import datetime
+from datetime import datetime, timedelta
 
 app = Flask(__name__)
 @app.route('/')
-def home(): return "V21 OB+Fibo+Liquidity Sweep"
+def home(): return "V23 OB+Fibo+Liquidity+Time+Astro+Technical"
 
 def keep_alive():
     while True:
@@ -42,19 +42,6 @@ def get_candles(tf,lim=200):
         except: pass
     return []
 
-def get_market_data():
-    data={}
-    try:
-        r=requests.get("https://api.binance.vision/api/v3/ticker/24hr?symbol=BTCUSDT",timeout=5).json()
-        data['btc_change']=float(r['priceChangePercent'])
-    except: data['btc_change']=0
-    try:
-        r=requests.get("https://api.gold-api.com/price/XAU",timeout=5).json()
-        data['gold_change']=r.get('ch',0)
-    except: data['gold_change']=0
-    data['news']=["لا اخبار قوية - حركة فنية"]
-    return data
-
 def find_zones(candles):
     zones=[]
     for i in range(20,len(candles)-3):
@@ -62,94 +49,97 @@ def find_zones(candles):
             c0=float(candles[i][4]); o0=float(candles[i][1]); h0=float(candles[i][2]); l0=float(candles[i][3])
             c1=float(candles[i+1][4]); o1=float(candles[i+1][1])
             if c0<o0 and c1>o1 and (c1-o1)>abs(c0-o0)*1.1:
-                zones.append({"type":"DEMAND","from":l0,"to":h0,"score":2,"i":i})
+                zones.append({"type":"DEMAND","from":l0,"to":h0,"i":i})
             if c0>o0 and c1<o1 and (o1-c1)>abs(c0-o0)*1.1:
-                zones.append({"type":"SUPPLY","from":l0,"to":h0,"score":2,"i":i})
+                zones.append({"type":"SUPPLY","from":l0,"to":h0,"i":i})
         except: continue
     return zones[-20:]
 
 def calc_fibonacci(candles):
     if len(candles)<50: return None
-    highs=[float(c[2]) for c in candles[-50:]]
-    lows=[float(c[3]) for c in candles[-50:]]
-    swing_high=max(highs); swing_low=min(lows)
-    diff=swing_high-swing_low
-    levels={
-        "23.6%": swing_high - diff*0.236,
-        "38.2%": swing_high - diff*0.382,
-        "50%": swing_high - diff*0.5,
-        "61.8%": swing_high - diff*0.618,
-        "78.6%": swing_high - diff*0.786,
-    }
-    return {"high":swing_high,"low":swing_low,"levels":levels}
+    highs=[float(c[2]) for c in candles[-50:]]; lows=[float(c[3]) for c in candles[-50:]]
+    sh=max(highs); sl=min(lows); diff=sh-sl
+    return {"high":sh,"low":sl,"levels":{"38.2%": sh-diff*0.382,"50%": sh-diff*0.5,"61.8%": sh-diff*0.618}}
 
-# === جديد: كشف اصطياد السيولة ===
 def detect_liquidity_sweep(candles):
     if len(candles)<60: return None
-    # حدد اقوى دعم ومقاومة بآخر 50 شمعة
-    recent=candles[-50:]
-    lows=[float(c[3]) for c in recent]
-    highs=[float(c[2]) for c in recent]
-    closes=[float(c[4]) for c in recent]
+    recent=candles[-50:]; lows=[float(c[3]) for c in recent]; highs=[float(c[2]) for c in recent]
+    sup=min(lows); res=max(highs)
+    for c in candles[-5:]:
+        low=float(c[3]); close=float(c[4])
+        if low < sup - 1.5 and close > sup:
+            return {"type":"BUY_SWEEP","level":sup,"sweep_low":low,"msg":f"سويب شرائي تحت {sup:.1f}","is_valid":True,"entry":sup+1}
+    for c in candles[-5:]:
+        high=float(c[2]); close=float(c[4])
+        if high > res + 1.5 and close < res:
+            return {"type":"SELL_SWEEP","level":res,"sweep_high":high,"msg":f"سويب بيعي فوق {res:.1f}","is_valid":True,"entry":res-1}
+    return None
 
-    support=min(lows)
-    resistance=max(highs)
+# === جديد: تحليل زمني + فلكي + فني ===
+def get_time_analysis():
+    now=datetime.utcnow()
+    # تحليل زمني Gann
+    hour=now.hour
+    dow=now.weekday() #0 اثنين
+    session=""
+    if 0 <= hour < 8: session="اسيا - سيولة ضعيفة - حذر"
+    elif 8 <= hour < 13: session="لندن - سيولة عالية + اصطياد سيولة"
+    elif 13 <= hour < 17: session="لندن+نيويورك - اقوى وقت - ذروة الحركة"
+    else: session="نيويورك متأخر - سيولة ضعيفة"
 
-    # افحص آخر 5 شموع هل صار سويب
-    last5=candles[-5:]
-    sweep=None
+    # دورة زمنية 90 يوم
+    day_of_year=now.timetuple().tm_yday
+    gann_cycle=day_of_year % 90
+    gann_msg=""
+    if gann_cycle < 5: gann_msg="بداية دورة 90 يوم جان - انعكاس محتمل"
+    elif 44 <= gann_cycle <= 46: gann_msg="منتصف دورة 90 يوم - انعكاس محتمل"
+    elif gann_cycle > 85: gann_msg="نهاية دورة 90 يوم - انعكاس محتمل"
+    else: gann_msg=f"يوم {gann_cycle} من دورة 90 يوم جان"
 
-    # حالة 1: سويب تحت الدعم (شراء)
-    for c in last5:
-        low=float(c[3]); close=float(c[4]); open_=float(c[1])
-        # ذيل طويل تحت الدعم + اغلاق داخل المنطقة
-        if low < support - 1.5 and close > support:
-            # فرق بين الاختراق الوهمي والحقيقي: ذيل طويل + اغلاق داخل
-            wick_size = support - low
-            body = abs(close-open_)
-            if wick_size > 1.5 and body < wick_size*2: # ذيل اكبر من الجسم
-                sweep={
-                    "type":"BUY_SWEEP",
-                    "level":support,
-                    "sweep_low":low,
-                    "msg":f"✅ اصطياد سيولة شرائي: السعر نزل تحت الدعم {support:.1f} ل {low:.1f} (اخذ ستوبات) ورجع اغلق فوق - دخول مؤسسات",
-                    "entry":support+1,
-                    "is_valid": True
-                }
-                break
+    return {"session":session,"gann":gann_msg,"dow":dow,"hour":hour,"day":day_of_year}
 
-    # حالة 2: سويب فوق المقاومة (بيع)
-    if not sweep:
-        for c in last5:
-            high=float(c[2]); close=float(c[4]); open_=float(c[1])
-            if high > resistance + 1.5 and close < resistance:
-                wick_size = high - resistance
-                body = abs(close-open_)
-                if wick_size > 1.5 and body < wick_size*2:
-                    sweep={
-                        "type":"SELL_SWEEP",
-                        "level":resistance,
-                        "sweep_high":high,
-                        "msg":f"✅ اصطياد سيولة بيعي: السعر طلع فوق المقاومة {resistance:.1f} ل {high:.1f} (اخذ ستوبات) ورجع اغلق تحت - دخول مؤسسات",
-                        "entry":resistance-1,
-                        "is_valid": True
-                    }
-                    break
+def get_moon_phase():
+    # حساب تقريبي لطور القمر
+    now=datetime.utcnow()
+    # قمر جديد معروف 2000-01-06
+    known_new_moon=datetime(2000,1,6,18,14)
+    diff=(now-known_new_moon).days + (now-known_new_moon).seconds/86400
+    lunar_cycle=29.53
+    phase=diff % lunar_cycle
+    if phase < 1: return {"phase":"قمر جديد 🌑","impact":"انعكاس قوي - بداية ترند - شراء ذهب تاريخيا قوي","energy":"بداية"}
+    elif phase < 7.4: return {"phase":"هلال متزايد 🌒","impact":"طاقة صاعدة - استمرار","energy":"صاعد"}
+    elif phase < 14.7: return {"phase":"تربيع اول 🌓","impact":"تذبذب - قرار","energy":"متردد"}
+    elif phase < 16: return {"phase":"بدر مكتمل 🌕","impact":"ذروة + انعكاس قوي جدا - احذر - تاريخيا قمم الذهب عند البدر","energy":"ذروة"}
+    elif phase < 22: return {"phase":"احدب متناقص 🌖","impact":"طاقة هابطة - جني ارباح","energy":"هابط"}
+    else: return {"phase":"هلال متناقص 🌘","impact":"نهاية دورة - ضعف","energy":"هابط"}
 
-    # حالة 3: كسر حقيقي - لا نتداول
-    if not sweep:
-        # اذا اغلاق شمعة كبيرة برا المستوى = كسر حقيقي
-        last_close=closes[-1]
-        last_open=float(recent[-1][1])
-        body_size=abs(last_close-last_open)
-        if last_close < support - 3 and body_size > 4:
-            sweep={"type":"REAL_BREAKDOWN","msg":f"❌ كسر حقيقي تحت {support:.1f} بشمعة كبيرة {body_size:.1f}$ - لا تتداول عكس الكسر","is_valid": False}
-        elif last_close > resistance + 3 and body_size > 4:
-            sweep={"type":"REAL_BREAKOUT","msg":f"❌ اختراق حقيقي فوق {resistance:.1f} بشمعة كبيرة - لا تتداول عكس الاختراق","is_valid": False}
+def get_technical(candles):
+    if len(candles)<50: return {}
+    closes=[float(c[4]) for c in candles]
+    # RSI 14
+    gains=[]; losses=[]
+    for i in range(1,15):
+        diff=closes[-i]-closes[-i-1]
+        if diff>0: gains.append(diff)
+        else: losses.append(abs(diff))
+    avg_gain=sum(gains)/14 if gains else 0.1
+    avg_loss=sum(losses)/14 if losses else 0.1
+    rs=avg_gain/(avg_loss+0.001)
+    rsi=100-(100/(1+rs))
+    # EMA 20/50
+    ema20=sum(closes[-20:])/20
+    ema50=sum(closes[-50:])/50
+    # MACD تقريبي
+    ema12=sum(closes[-12:])/12
+    ema26=sum(closes[-26:])/26
+    macd=ema12-ema26
 
-    return sweep
+    trend="صاعد" if ema20>ema50 and macd>0 else "هابط" if ema20<ema50 and macd<0 else "عرضي"
+    rsi_msg="تشبع شرائي - بيع" if rsi>70 else "تشبع بيعي - شراء" if rsi<30 else "متوازن"
 
-def draw_chart(candles,zones,fib,sweep,price,path="/tmp/gold.png"):
+    return {"rsi":rsi,"ema20":ema20,"ema50":ema50,"macd":macd,"trend":trend,"rsi_msg":rsi_msg}
+
+def draw_chart(candles,zones,fib,sweep,tech,price,path="/tmp/gold.png"):
     plt.figure(figsize=(13,7),facecolor='#0e0e12')
     ax=plt.gca(); ax.set_facecolor('#0e0e12')
     data=candles[-80:]
@@ -162,162 +152,147 @@ def draw_chart(candles,zones,fib,sweep,price,path="/tmp/gold.png"):
         x0=z['i']-len(candles)+len(data)
         if x0<0: continue
         col='#00ff88' if z['type']=="DEMAND" else '#ff3355'
-        rect=patches.Rectangle((x0,z['from']),80-x0,z['to']-z['from'],facecolor=col,alpha=0.2,linewidth=0)
-        ax.add_patch(rect)
+        ax.add_patch(patches.Rectangle((x0,z['from']),80-x0,z['to']-z['from'],facecolor=col,alpha=0.2,linewidth=0))
     if fib:
-        colors={"38.2%":"#ffaa00","50%":"#ffffff","61.8%":"#00ff88"}
         for k,v in fib['levels'].items():
-            if k in colors:
-                ax.axhline(v, color=colors[k], linestyle='--', alpha=0.6, linewidth=2 if k=="38.2%" else 1)
-                ax.text(0,v,f" {k}", color=colors[k], fontsize=7, va='bottom')
-    # رسم السيولة
+            ax.axhline(v, color='#ffaa00' if '38.2' in k else '#888', linestyle='--', alpha=0.7, linewidth=2 if '38.2' in k else 1)
     if sweep and "level" in sweep:
-        ax.axhline(sweep["level"], color='#ff00ff', linestyle='-', alpha=0.8, linewidth=1.5)
-        ax.text(40,sweep["level"], f" LIQUIDITY {sweep['level']:.1f}", color='#ff00ff', fontsize=8, fontweight='bold', bbox=dict(facecolor='#ff00ff', alpha=0.2))
-        if "sweep_low" in sweep:
-            ax.plot([75,75],[sweep["level"],sweep["sweep_low"]], color='#ff00ff', linewidth=3, marker='o')
-        if "sweep_high" in sweep:
-            ax.plot([75,75],[sweep["level"],sweep["sweep_high"]], color='#ff00ff', linewidth=3, marker='o')
+        ax.axhline(sweep["level"], color='#ff00ff', alpha=0.9, linewidth=2)
+    if tech:
+        ax.plot([0,79],[tech['ema20'],tech['ema20']], color='#00aaff', linestyle=':', alpha=0.8, label='EMA20')
+        ax.plot([0,79],[tech['ema50'],tech['ema50']], color='#ffaa00', linestyle=':', alpha=0.8, label='EMA50')
     if price:
-        ax.axhline(price,color='white',linestyle='-',alpha=0.9)
-        ax.text(79,price,f" {price:.2f} ",color='black',fontsize=8,ha='right',bbox=dict(facecolor='white'))
+        ax.axhline(price,color='white',alpha=1,linewidth=1.5)
+        ax.text(79,price,f" {price:.1f} ",color='black',fontsize=8,bbox=dict(facecolor='white'))
     ax.set_xlim(-2,82)
     try:
         lows=[float(c[3]) for c in data]; highs=[float(c[2]) for c in data]
         ax.set_ylim(min(lows)*0.995,max(highs)*1.005)
     except: pass
     ax.tick_params(colors='gray')
-    plt.title(f"OB + Fibo 38.2% + Liquidity Sweep | {price}", color='white', fontsize=9)
+    plt.title(f"{price} | RSI {tech.get('rsi',0):.0f} | {tech.get('trend','')} | {tech.get('rsi_msg','')}", color='white', fontsize=9)
     plt.tight_layout(); plt.savefig(path,dpi=150,facecolor='#0e0e12'); plt.close()
     return path
 
 async def tawsiya(update,context):
-    await update.message.reply_text("🔍 عم حلل: OB + فيبو + سيولة...")
+    await update.message.reply_text("🔍 عم حلل: زمني + فلكي + فني + OB + فيبو + سيولة...")
     price=get_price()
     c1h=get_candles("1h",200)
     if len(c1h)<50:
-        await update.message.reply_text(f"السوق مسكر - {price}")
+        await update.message.reply_text(f"السوق مسكر {price}")
         return
-    mkt=get_market_data()
     zones=find_zones(c1h)
     fib=calc_fibonacci(c1h)
-    sweep=detect_liquidity_sweep(c1h) # جديد
-    c4h=get_candles("4h",200)
-    all_zones=zones+find_zones(c4h)
+    sweep=detect_liquidity_sweep(c1h)
+    tech=get_technical(c1h)
+    time_an=get_time_analysis()
+    moon=get_moon_phase()
 
+    demands=[z for z in zones if z['type']=="DEMAND"]
+    supplies=[z for z in zones if z['type']=="SUPPLY"]
+    nearest_sup=sorted(supplies, key=lambda x: abs(x['from']-price))[0] if supplies else None
+    nearest_dem=sorted(demands, key=lambda x: abs(price-x['to']))[0] if demands else None
     highs=[float(c[2]) for c in c1h[-50:]]; lows=[float(c[3]) for c in c1h[-50:]]
     high_50=max(highs); low_50=min(lows)
     closes=[float(c[4]) for c in c1h[-20:]]
     trend_up=closes[-1]>sum(closes)/len(closes)
 
-    demands=[z for z in all_zones if z['type']=="DEMAND"]
-    supplies=[z for z in all_zones if z['type']=="SUPPLY"]
-    nearest_sup=sorted(supplies, key=lambda x: abs(x['from']-price))[0] if supplies else None
-    nearest_dem=sorted(demands, key=lambda x: abs(price-x['to']))[0] if demands else None
-
-    # منطق الدخول مع السيولة
-    fib_382=fib['levels']["38.2%"] if fib else 0
-    fib_confirm=""
-    triple_confirm=False
-
-    if nearest_sup and fib and abs(nearest_sup['from']-fib_382)<8:
-        fib_confirm=f"✅ OB+فيبو 38.2% متوافق {fib_382:.1f}"
-
-    sweep_confirm=""
+    # منطق دخول مع كلشي
+    confirmations=[]
+    if nearest_sup and fib and abs(nearest_sup['from']-fib['levels']["38.2%"])<8:
+        confirmations.append("OB+فيبو38.2%")
     if sweep and sweep.get("is_valid"):
-        sweep_confirm=sweep["msg"]
-        if sweep["type"]=="BUY_SWEEP" and nearest_dem:
-            if abs(sweep["level"]-nearest_dem['to'])<5 and abs(fib_382-nearest_dem['to'])<10:
-                triple_confirm=True
-        if sweep["type"]=="SELL_SWEEP" and nearest_sup:
-            if abs(sweep["level"]-nearest_sup['from'])<5 and abs(fib_382-nearest_sup['from'])<10:
-                triple_confirm=True
-    elif sweep and not sweep.get("is_valid"):
-        sweep_confirm=sweep["msg"]
+        confirmations.append("سيولة")
+    if tech.get("rsi",50)<30 or tech.get("rsi",50)>70:
+        confirmations.append(f"RSI {tech['rsi']:.0f} تشبع")
+    if "انعكاس" in time_an["gann"]:
+        confirmations.append(f"زمني {time_an['gann']}")
+    if "بدر" in moon["phase"] or "جديد" in moon["phase"]:
+        confirmations.append(f"فلكي {moon['phase']}")
+
+    triple="🔥🔥🔥 تأكيد رباعي" if len(confirmations)>=3 else "🔥🔥 تأكيد ثلاثي" if len(confirmations)>=2 else ""
 
     if sweep and sweep["type"]=="BUY_SWEEP" and sweep["is_valid"]:
-        entry=sweep["entry"]; sl=sweep["sweep_low"]-1; tp1=entry+8; tp2=high_50
-        type_trade="🟢 شراء BUY - سيولة"
-        reason=f"اصطياد سيولة تحت {sweep['level']:.1f} + طلب {nearest_dem['from']:.1f} اذا موجود"
+        entry=sweep["entry"]; sl=sweep["sweep_low"]-1; tp1=entry+8; tp2=high_50; type_trade="🟢 شراء BUY - سيولة"
     elif sweep and sweep["type"]=="SELL_SWEEP" and sweep["is_valid"]:
-        entry=sweep["entry"]; sl=sweep["sweep_high"]+1; tp1=entry-8; tp2=low_50
-        type_trade="🔴 بيع SELL - سيولة"
-        reason=f"اصطياد سيولة فوق {sweep['level']:.1f} + عرض {nearest_sup['from']:.1f} اذا موجود"
+        entry=sweep["entry"]; sl=sweep["sweep_high"]+1; tp1=entry-8; tp2=low_50; type_trade="🔴 بيع SELL - سيولة"
     elif not trend_up and nearest_sup:
-        entry=nearest_sup['from']+0.5; sl=nearest_sup['to']+3.8; tp1=entry-8; tp2=low_50
-        type_trade="🔴 بيع SELL"
-        reason=f"ترند هابط + عرض {nearest_sup['from']:.1f}"
+        entry=nearest_sup['from']+0.5; sl=nearest_sup['to']+3.8; tp1=entry-8; tp2=low_50; type_trade="🔴 بيع SELL"
     elif trend_up and nearest_dem:
-        entry=nearest_dem['to']-0.5; sl=nearest_dem['from']-3.8; tp1=entry+8; tp2=high_50
-        type_trade="🟢 شراء BUY"
-        reason=f"ترند صاعد + طلب {nearest_dem['from']:.1f}"
+        entry=nearest_dem['to']-0.5; sl=nearest_dem['from']-3.8; tp1=entry+8; tp2=high_50; type_trade="🟢 شراء BUY"
     else:
-        entry=price; sl=price-5; tp1=price-8; tp2=low_50
-        type_trade="⏸️ انتظار"
-        reason="ما في منطقة واضحة"
+        entry=price; sl=price-5; tp1=price+8; tp2=high_50; type_trade="⏸️ انتظار"
 
-    chart=draw_chart(c1h,zones,fib,sweep,price)
+    chart=draw_chart(c1h,zones,fib,sweep,tech,price)
 
-    triple_txt="🔥🔥🔥 تأكيد ثلاثي OB+فيبو38.2%+سيولة = اقوى دخول" if triple_confirm else "تأكيد ثنائي" if fib_confirm and sweep_confirm else ""
-
-    txt=f"""{type_trade} | {triple_txt}
+    txt=f"""{type_trade} {triple}
 ━━━━━━━━━━━━━━━
-💰 السعر: {price:.2f}
+💰 {price:.2f}
 
-🎯 التوصية:
-دخول: {entry:.2f}
-وقف: {sl:.2f} ({abs(entry-sl):.1f}$)
-هدف1: {tp1:.2f} ({abs(tp1-entry):.1f}$)
-هدف2: {tp2:.2f}
+🎯 دخول: {entry:.1f} | وقف: {sl:.1f} ({abs(entry-sl):.1f}$) | هدف1: {tp1:.1f} | هدف2: {tp2:.1f}
 نسبة: 1:{abs(tp1-entry)/max(1,abs(entry-sl)):.1f}
 
-📍 الفني القديم (ما حذفتو):
-{reason}
+📍 الفني القديم (موجود):
 دعم: {nearest_dem['from']:.1f} | مقاومة: {nearest_sup['from']:.1f}
 {len(demands)} طلب | {len(supplies)} عرض
-قمة 50: {high_50:.1f} | قاع 50: {low_50:.1f}
+فيبو 38.2%: {fib['levels']['38.2%']:.1f} | سيولة: {sweep['msg'] if sweep else 'لا يوجد'}
 
-📐 فيبو 38.2% (من الفيديو الاول):
-الذهبي: {fib_382:.1f}
-{fib_confirm}
+📊 الفني الجديد:
+RSI(14): {tech['rsi']:.1f} - {tech['rsi_msg']}
+EMA20: {tech['ema20']:.1f} | EMA50: {tech['ema50']:.1f}
+MACD: {tech['macd']:+.2f}
+الترند الفني: {tech['trend']} | {'صاعد' if trend_up else 'هابط'} (سعر vs متوسط 20)
 
-💧 سيولة (من الفيديو الثاني - الجديد):
-{sweep_confirm if sweep_confirm else 'ما في سويب حاليا - انتظر كسر وهمي بذيل طويل + اغلاق داخل'}
-{triple_txt}
+⏰ الزمني الجديد (Gann):
+الجلسة: {time_an['session']}
+دورة جان: {time_an['gann']}
+اليوم: {time_an['day']} من السنة | الساعة UTC: {time_an['hour']}:00
+{"⚠️ وقت انعكاس زمني - انتبه" if "انعكاس" in time_an['gann'] else "وقت عادي"}
 
-💡 كيف تدخل مثل الفيديو:
-1. شوف مستوى دعم/مقاومة واضح ✅
-2. انتظر السعر ياخد السيولة (ذيل طويل برا المستوى)
-3. ادخل لما يرجع يغلق داخل المستوى
-4. اذا المنطقة = فيبو 38.2% + OB = دخول مؤسسات قوي
+🌙 الفلكي الجديد (ترفيهي):
+الطور: {moon['phase']}
+التأثير: {moon['impact']}
+الطاقة: {moon['energy']}
+{"⚠️ بدر مكتمل - تاريخيا الذهب يعمل قمة" if "بدر" in moon['phase'] else "🌑 قمر جديد - بداية ترند جديد محتمل" if "جديد" in moon['phase'] else ""}
 
-🌍 BTC: {mkt.get('btc_change',0):+.1f}%
+✅ التأكيدات المجتمعة:
+{', '.join(confirmations) if confirmations else 'بانتظار تأكيد'}
+{triple}
+
+💡 كيف تستخدم الكل:
+1. OB + فيبو 38.2% = منطقة
+2. + سيولة سويب = دخول مؤسسات
+3. + RSI تشبع 30/70 = تأكيد فني
+4. + زمني انعكاس جان + فلكي بدر/قمر جديد = توقيت الانعكاس
+= دخول قوي جدا اذا اجتمعو
 """
     await context.bot.send_photo(chat_id=update.effective_chat.id, photo=open(chart,'rb'), caption=txt)
 
 async def alert_on(update,context):
     ALERT_CHATS.add(update.effective_chat.id)
-    await update.message.reply_text("✅ تنبيه OB+فيبو+سيولة شغال 🔔")
+    await update.message.reply_text("✅ تنبيه شامل شغال: OB+فيبو+سيولة+زمني+فلكي+فني")
 
 async def alert_off(update,context):
     ALERT_CHATS.discard(update.effective_chat.id)
     await update.message.reply_text("❌ وقفنا")
 
 async def start(update,context):
-    await update.message.reply_text("V21 OB+Fibo+Liquidity\n/tawsiya توصية ثلاثية التأكيد")
+    await update.message.reply_text("V23 شامل\n/tawsiya تحليل كامل\n/alert_on تنبيه شامل")
 
 async def check_alerts(context):
     if not ALERT_CHATS: return
     price=get_price()
     c1h=get_candles("1h",200)
     zones=find_zones(c1h)
-    sweep=detect_liquidity_sweep(c1h)
     fib=calc_fibonacci(c1h)
+    sweep=detect_liquidity_sweep(c1h)
+    tech=get_technical(c1h)
     for z in zones:
         if z['from']-3 <= price <= z['to']+3:
             extra=""
             if fib and abs(z['from']-fib['levels']["38.2%"])<8: extra+=" + فيبو38.2% 🔥"
             if sweep and sweep.get("is_valid") and abs(sweep["level"]-z['from'])<5: extra+=" + سيولة 🔥"
+            if tech and (tech['rsi']<30 or tech['rsi']>70): extra+=f" + RSI {tech['rsi']:.0f} 🔥"
             key=f"{z['type']}_{z['from']:.0f}"
             if LAST_ALERT.get(key) and abs(price-LAST_ALERT[key])<4: continue
             LAST_ALERT[key]=price
