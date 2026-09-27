@@ -1,17 +1,33 @@
 import os
 import time
 import math
+import threading
 import requests
 import pandas as pd
 import yfinance as yf
 from datetime import datetime, timezone
+from http.server import HTTPServer, BaseHTTPRequestHandler
+
+# ==========================================
+# خادم ويب مصغر لإبقاء الخدمة نشطة على Render Free Tier
+# ==========================================
+class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Gold Trading Bot is Active & Running!")
+
+def run_http_server():
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), SimpleHTTPRequestHandler)
+    print(f"🌐 HTTP Server running on port {port}")
+    server.serve_forever()
 
 # ==========================================
 # بيانات التلجرام الخاصة بك
 # ==========================================
 TELEGRAM_TOKEN = "8347268155:AAH3oQ4MaH1rWxvoEgoEOLfgPI_DfRAsNBY"
 CHAT_ID = "1347502348"
-
 SYMBOL = "GC=F"
 
 def send_telegram_message(message):
@@ -117,7 +133,6 @@ def analyze_scalping():
     prev_macd = float(prev_row['MACD'])
     prev_signal = float(prev_row['Signal_Line'])
 
-    # شروط صفقات السكالبينج السريعة
     scalp_buy = (macd > signal) and (prev_macd <= prev_signal) and (rsi < 40)
     scalp_sell = (macd < signal) and (prev_macd >= prev_signal) and (rsi > 60)
 
@@ -215,10 +230,16 @@ def analyze_gold_main():
 
     return None
 
+# ==========================================
+# الحلقة الرئيسية لتشغيل السيرفر والبوت
+# ==========================================
 if __name__ == "__main__":
+    # تشغيل خادم الويب في Thread مستقل لإبقاء Render سعيداً
+    threading.Thread(target=run_http_server, daemon=True).start()
+
     print("🤖 تم تشغيل البوت الخارق (توصيات رئيسية + صفقات سريعة)...")
-    send_telegram_message("✅ **تم تفعيل نظام الصفقات السريعة (Scalping) والتوصيات الرئيسية!**\nجاري مسح فريم 5 دقائق للسكالبينج وفريم 15 دقيقة للتوصيات الكبرى...")
-    
+    send_telegram_message("✅ **تم تحديث البوت وتفعيل Web Server بنجاح!**\nالخدمة شغالة 100% مجاناً وجاري مراقبة السوق...")
+
     last_main_signal_time = 0
     last_scalp_signal_time = 0
 
@@ -232,13 +253,13 @@ if __name__ == "__main__":
                 send_telegram_message(scalp_msg)
                 last_scalp_signal_time = current_time
 
-            # 2. فحص التوصيات الرئيسية المتكاملة
+            # 2. فحص التوصيات الرئيسية
             main_msg = analyze_gold_main()
             if main_msg and (current_time - last_main_signal_time > 1800):
                 send_telegram_message(main_msg)
                 last_main_signal_time = current_time
 
-            print("السوق قيد المراقبة اللحظية والسريعة...")
+            print("السوق قيد المراقبة اللحظية...")
         except Exception as e:
             print(f"خطأ: {e}")
 
