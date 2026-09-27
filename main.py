@@ -33,7 +33,7 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"Gold Bot Active")
+        self.wfile.write(b"Gold Bot - SMC, Fibonacci & Supply/Demand Active")
 
 def run_http_server():
     port = int(os.environ.get("PORT", 8080))
@@ -42,92 +42,137 @@ def run_http_server():
 
 def is_market_open():
     weekday = datetime.now(timezone.utc).weekday()
-    if weekday in [5, 6]:
+    if weekday in [5, 6]:  # السبت والأحد
         return False
     return True
 
-def get_economic_news_summary():
-    if not is_market_open():
-        return "🔴 **السوق مغلق حالياً (عطلة نهاية الأسبوع)**\n\n📰 **ملخص الأخبار:** لا توجد بيانات اقتصادية حية اليوم. يفتتح السوق مع بداية الجلسة الآسيوية."
+# ==========================================
+# حساب المؤشرات واستراتيجيات العرض/الطلب والفيبوناتشي
+# ==========================================
+def calculate_advanced_indicators(df):
+    df['SMA_50'] = df['Close'].rolling(window=50).mean()
     
-    return """📰 **تقرير الأخبار الاقتصادية:**
+    # حساب RSI
+    delta = df['Close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    rs = gain / loss
+    df['RSI'] = 100 - (100 / (1 + rs))
 
-• **أسعار الفائدة والتضخم:** متابعة تصريحات الفيدرالي وبيانات CPI.
-• **حالة المخاطر:** مستقرة حالياً 🟢 بدون أخبار عالية الخطورة.
-• **توصية:** انتبه لأوقات بيانات NFP والوظائف الفيدرالية."""
+    # تحديد القمم والقيعان (Swing High / Swing Low)
+    df['Swing_High'] = df['High'].rolling(window=20).max()
+    df['Swing_Low'] = df['Low'].rolling(window=20).min()
+    
+    # مستويات الفيبوناتشي التصحيحية (Fibonacci Retracements)
+    high_val = df['Swing_High']
+    low_val = df['Swing_Low']
+    diff = high_val - low_val
 
-def get_moon_phase(dt):
-    diff = dt - datetime(2000, 1, 6, 18, 14, tzinfo=timezone.utc)
-    days = diff.total_seconds() / 86400.0
-    angle = ((days % 29.53058770576) / 29.53058770576) * 360.0
+    df['Fib_382'] = high_val - (diff * 0.382)
+    df['Fib_500'] = high_val - (diff * 0.500)  # Discount Zone (SMC)
+    df['Fib_618'] = high_val - (diff * 0.618)  # Golden Zone
 
-    if angle < 15 or angle > 345:
-        return "محاق (New Moon) 🌑"
-    elif 165 < angle < 195:
-        return "بدر (Full Moon) 🌕"
-    else:
-        return "مسار فلكي اعتيادي 🌙"
-
-def analyze_time_cycles():
-    now = datetime.now(timezone.utc)
-    hour = now.hour
-    if 7 <= hour < 12:
-        session = "جلسة لندن 🇬🇧"
-    elif 12 <= hour < 17:
-        session = "تداخل لندن ونيويورك 🇺🇸"
-    elif 17 <= hour < 21:
-        session = "جلسة نيويورك المتأخرة 🏛️"
-    else:
-        session = "الجلسة الآسيوية 🌏"
-
-    is_time_turn = hour in [2, 6, 10, 14, 18, 22]
-    return session, is_time_turn
+    return df
 
 def get_live_market_status():
     try:
         market_open = is_market_open()
         market_status_text = "🟢 **السوق مفتوح**" if market_open else "🔴 **السوق مغلق (عطلة نهاية الأسبوع)**"
 
-        # طلب البيانات مع معالجة حليمة للـ Timeout و أوقات الإغلاق
         ticker = yf.Ticker(SYMBOL)
         df = ticker.history(period="1mo", interval="1d" if not market_open else "15m")
-        
         if df.empty:
             df = ticker.history(period="1mo", interval="1d")
 
         if df.empty:
             return "تعذر جلب البيانات اللحظية حالياً، أعد المحاولة بعد قليل."
 
-        price = round(float(df['Close'].iloc[-1]), 2)
+        df = calculate_advanced_indicators(df)
+        last_row = df.iloc[-1]
         
-        # حساب RSI مبسط على آخر القيم
-        delta = df['Close'].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-        rs = gain / loss
-        rsi_series = 100 - (100 / (1 + rs))
-        rsi = round(float(rsi_series.iloc[-1]), 2) if not pd.isna(rsi_series.iloc[-1]) else 50.0
+        price = round(float(last_row['Close']), 2)
+        swing_high = round(float(last_row['Swing_High']), 2)
+        swing_low = round(float(last_row['Swing_Low']), 2)
+        fib_382 = round(float(last_row['Fib_382']), 2)
+        fib_500 = round(float(last_row['Fib_500']), 2)
+        fib_618 = round(float(last_row['Fib_618']), 2)
+        rsi = round(float(last_row['RSI']), 2) if not pd.isna(last_row['RSI']) else 50.0
 
-        sma50_series = df['Close'].rolling(window=min(50, len(df))).mean()
-        sma50 = round(float(sma50_series.iloc[-1]), 2)
-        trend = "صاعد 📈" if price > sma50 else "هابط 📉"
+        # تحديد التقييم
+        if price <= fib_618:
+            zone_desc = "منطقة طلب قوية + المستوى الذهبي (Fib 0.618) 🛒🟢"
+        elif price <= fib_500:
+            zone_desc = "منطقة خصم الشراء (Discount Region - Fib 0.50) 🟢"
+        else:
+            zone_desc = "منطقة عرض مرتفعة (Premium Region - Supply) 📈🔴"
 
-        now = datetime.now(timezone.utc)
-        astro_phase = get_moon_phase(now)
-        time_session, is_time_turn = analyze_time_cycles()
-
-        return f"""📊 **تقرير الذهب الفوري (XAU/USD):**
+        return f"""📊 **تقرير الذهب الشامل (XAU/USD):**
 
 🔒 **حالة السوق:** {market_status_text}
-💰 **السعر ({'الحالي' if market_open else 'إغلاق الجمعة'}):** `{price}$`
-📈 **الاتجاه العام (SMA50):** {trend}
-📉 **مؤشر RSI:** {rsi}
-⏳ **الجلسة:** {time_session}
-🌌 **الدورة القمرية:** {astro_phase}
+💰 **السعر الحالي:** `{price}$`
+🎯 **مستويات الفيبوناتشي الحالية:**
+ • Fib 0.382: `{fib_382}$`
+ • Fib 0.500 (Discount): `{fib_500}$`
+ • Fib 0.618 (Golden Zone): `{fib_618}$`
 
-💡 *يتم استئناف التوصيات أوتوماتيكياً عند افتتاح السوق فجر الاثنين.*"""
+📍 **النطاق:** القمة `{swing_high}$` | القاع `{swing_low}$`
+🏷️ **التقييم:** {zone_desc}
+📉 **مؤشر RSI:** {rsi}"""
     except Exception as e:
         return f"حدث خطأ أثناء جلب السعر: {e}"
+
+def analyze_all_strategies():
+    if not is_market_open():
+        return None
+    try:
+        data = yf.download(tickers=SYMBOL, period="5d", interval="15m", progress=False)
+        if data.empty or len(data) < 30:
+            return None
+
+        if isinstance(data.columns, pd.MultiIndex):
+            data.columns = data.columns.get_level_values(0)
+
+        df = calculate_advanced_indicators(data)
+        last_row = df.iloc[-1]
+        prev_row = df.iloc[-2]
+
+        price = round(float(last_row['Close']), 2)
+        fib_500 = float(last_row['Fib_500'])
+        fib_618 = float(last_row['Fib_618'])
+        swing_high = float(last_row['Swing_High'])
+        swing_low = float(last_row['Swing_Low'])
+        rsi = float(last_row['RSI'])
+
+        # شرط الشراء: وصول السعر لمنطقة الطلب/الفيبوناتشي (0.50 أو 0.618) مع ارتداد صاعد
+        is_buy_signal = (price <= fib_500) and (prev_row['Close'] < price) and (rsi < 45)
+        
+        # شرط البيع: وصول السعر لمنطقة العرض أفقياً وأعلى الفيبوناتشي مع ارتداد هابط
+        is_sell_signal = (price >= fib_382) and (prev_row['Close'] > price) and (rsi > 65)
+
+        if is_buy_signal:
+            tp = round(swing_high, 2)
+            sl = round(swing_low - 2.0, 2)
+            return f"""💎 **توصية شراء متكاملة (BUY XAU/USD)** 💎
+
+📍 **سعر الدخول:** `{price}$` (في منطقة الطلب + Fib 0.50/0.618)
+🎯 **أخذ الربح (Swing High):** `{tp}$`
+🛑 **وقف الخسارة (تحت القاع):** `{sl}$`
+📊 **التحليل:** ارتداد من منطقة خصم SMC ومستويات الفيبوناتشي الذهبية.
+📉 **RSI:** {rsi}"""
+
+        elif is_sell_signal:
+            tp = round(swing_low, 2)
+            sl = round(swing_high + 2.0, 2)
+            return f"""💎 **توصية بيع متكاملة (SELL XAU/USD)** 💎
+
+📍 **سعر الدخول:** `{price}$` (في منطقة العرض Premium Region)
+🎯 **أخذ الربح (Swing Low):** `{tp}$`
+🛑 **وقف الخسارة (فوق القمة):** `{sl}$`
+📊 **التحليل:** وصول لمنطقة العرض واختبار مستويات الفيبوناتشي العليا.
+📉 **RSI:** {rsi}"""
+    except Exception:
+        pass
+    return None
 
 def telegram_listener():
     offset = 0
@@ -141,14 +186,13 @@ def telegram_listener():
                     if "message" in update and "text" in update["message"]:
                         msg_text = update["message"]["text"].strip()
                         
-                        if any(word in msg_text for word in ["سعر", "تحليل", "وضع", "توصية", "/tawsiya"]):
+                        if any(word in msg_text for word in ["سعر", "تحليل", "وضع", "توصية", "فيبوناتشي", "عرض", "طلب", "/tawsiya"]):
                             reply = get_live_market_status()
                             send_telegram_message(reply)
                         elif any(word in msg_text for word in ["خبر", "اخبار", "/news"]):
-                            reply = get_economic_news_summary()
-                            send_telegram_message(reply)
+                            send_telegram_message("📰 **حالة الأخبار:** معالجة مستويات العرض والطلب والفيبوناتشي مستمرة تلقائياً.")
                         elif msg_text in ["/start", "مرحبا", "هلا", "شغال"]:
-                            send_telegram_message("أهلاً بك يا سليم! 🤖 اكتب **سعر** للتحليل اللحظي وسأجيبك فوراً.")
+                            send_telegram_message("أهلاً بك يا سليم! 🤖 تم دمج استراتيجيات **العرض والطلب + الفيبوناتشي + SMC** بنجاح. اكتب **سعر** للتحليل المباشر.")
         except Exception:
             pass
         time.sleep(1)
@@ -157,7 +201,18 @@ if __name__ == "__main__":
     threading.Thread(target=run_http_server, daemon=True).start()
     threading.Thread(target=telegram_listener, daemon=True).start()
 
-    send_telegram_message("✅ **تم تحديث نظام معالجة الأسعار بنجاح!**\nارسل كلمة 'سعر' الآن للحصول على النتيجة فوراً.")
+    send_telegram_message("✅ **تم تحديث البوت ودمج استراتيجيات (العرض والطلب + الفيبوناتشي 0.382/0.5/0.618 + SMC) بنجاح!**")
+
+    last_trade_time = 0
 
     while True:
+        try:
+            current_time = time.time()
+            trade_msg = analyze_all_strategies()
+            if trade_msg and (current_time - last_trade_time > 1800):
+                send_telegram_message(trade_msg)
+                last_trade_time = current_time
+        except Exception as e:
+            print(f"خطأ: {e}")
+
         time.sleep(60)
