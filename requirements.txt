@@ -1,5 +1,2 @@
 python-telegram-bot==20.8
-requests==2.31.0python-telegram-bot[job-queue]==20.7
-Flask
-requests
-matplotlib
+requests==2.31.0
