@@ -11,7 +11,8 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 # إعدادات البوت والاتصال
 TELEGRAM_TOKEN = "8347268155:AAH3oQ4MaH1rWxvoEgoEOLfgPI_DfRAsNBY"
 CHAT_ID = "1347502348"
-SYMBOL = "GC=F"
+# تم تعديل الرمز هنا ليطابق السعر الفوري (Spot Gold) تماماً مع منصات التداول
+SYMBOL = "XAUUSD=X"
 
 # تنظيف الـ Webhook القديم لضمان عمل getUpdates بكفاءة عالية
 try:
@@ -36,7 +37,7 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"Gold Bot Ultimate SMC & Astro Strategy Active")
+        self.wfile.write(b"Gold Spot Bot Ultimate SMC & Astro Strategy Active")
 
 def run_http_server():
     """خادم ويب مصغر للحفاظ على نشاط البوت على منصات الاستضافة"""
@@ -105,7 +106,7 @@ def calculate_advanced_indicators(df):
     return df
 
 def get_comprehensive_market_report():
-    """جلب تقرير شامل ومحدث يضمن جلب آخر سعر لحظي بدقة"""
+    """جلب تقرير شامل ومحدث للسعر الفوري بدقة عالية"""
     try:
         market_open = is_market_open()
         market_status_text = "🟢 **السوق مفتوح**" if market_open else "🔴 **السوق مغلق (عطلة نهاية الأسبوع)**"
@@ -137,7 +138,7 @@ def get_comprehensive_market_report():
         time_session, is_time_turn = analyze_time_cycles()
         time_turn_alert = " | ⚡ **تنبيه انعطاف زمني!**" if is_time_turn else ""
 
-        return f"""📊 **التقرير الشامل للذهب (SMC + الفلكي + الفني):**
+        return f"""📊 **التقرير الفوري الشامل للذهب (Spot XAU/USD):**
 
 🔒 **حالة السوق:** {market_status_text}
 💰 **السعر الحالي:** `{price}$`
@@ -151,7 +152,7 @@ def get_comprehensive_market_report():
         return f"حدث خطأ أثناء إعداد التقرير: {e}"
 
 def analyze_smc_smart_trades():
-    """فحص السوق لاكتشاف الصفقات بناءً على شروط دقيقة لاستراتيجية SMC"""
+    """فحص السوق الفوري لاكتشاف الصفقات بناءً على شروط SMC"""
     try:
         data = yf.download(tickers=SYMBOL, period="5d", interval="15m", progress=False)
         if data.empty or len(data) < 30:
@@ -180,10 +181,10 @@ def analyze_smc_smart_trades():
         if is_discount_buy:
             tp = round(swing_high, 2)
             sl = round(swing_low - 1.5, 2)
-            return f"""💎 **توصية قوية - SMC Discount Buy 💎**
+            return f"""💎 **توصية فورية - SMC Discount Buy 💎**
 
 🟢 **نوع الصفقة:** شراء (BUY XAU/USD)
-📍 **سعر الدخول:** `{price}$` (داخل منطقة الخصم)
+📍 **سعر الدخول:** `{price}$` (على السعر الفوري)
 🎯 **الهدف (TP):** `{tp}$`
 🛑 **وقف الخسارة (SL):** `{sl}$`
 📊 **مستوى 50%:** `{round(discount, 2)}$` | **RSI:** `{round(rsi, 2)}`
@@ -192,21 +193,21 @@ def analyze_smc_smart_trades():
         elif is_premium_sell:
             tp = round(swing_low, 2)
             sl = round(swing_high + 1.5, 2)
-            return f"""💎 **توصية قوية - SMC Premium Sell 💎**
+            return f"""💎 **توصية فورية - SMC Premium Sell 💎**
 
 🔴 **نوع الصفقة:** بيع (SELL XAU/USD)
-📍 **سعر الدخول:** `{price}$` (داخل منطقة البيع)
+📍 **سعر الدخول:** `{price}$` (على السعر الفوري)
 🎯 **الهدف (TP):** `{tp}$`
 🛑 **وقف الخسارة (SL):** `{sl}$`
 📊 **مستوى 50%:** `{round(discount, 2)}$` | **RSI:** `{round(rsi, 2)}`
 ⏳ **الجلسة:** {time_session} | 🌌 **الفلك:** {astro_phase}"""
         
         else:
-            return f"""⚖️ **تحليل التوصية السريعة الحالية:**
-السعر يتحرك حالياً عند `{price}$`. 
-🏷️ **التقييم:** لم تتحقق شروط الانعكاس الكاملة (Discount/Premium مع تقاطع مؤشر RSI)، السعر في منطقة استقرار حالياً. انتظر الفرصة أو راسلني لاحقاً."""
+            return f"""⚖️ **حالة التحليل السريع الفوري:**
+السعر الفوري الحالي: `{price}$`.
+🏷️ **التقييم:** لا توجد إشارة دخول انعكاسية مكتملة حالياً، السعر يتحرك في مسار طبيعي. يمكنك المتابعة أو طلب تحليل جديد لاحقاً."""
     except Exception as e:
-        return f"تعذر إجراء التحليل السريع حالياً: {e}"
+        return f"تعذر إجراء التحليل الفوري حالياً: {e}"
 
 def telegram_listener():
     """مستمع أوتوماتيكي لرسائل التيليجرام للاستجابة الفورية للأوامر"""
@@ -231,18 +232,16 @@ def telegram_listener():
                         sender_chat_id = str(update["message"]["chat"]["id"])
                         
                         if sender_chat_id == CHAT_ID:
-                            # طلب توصية سريعة فورية
                             if any(word in msg_text for word in ["توصية سريعة", "فرصة", "صفقة", "/fast", "/signal"]):
                                 quick_signal = analyze_smc_smart_trades()
                                 send_telegram_message(quick_signal)
-                            # طلب التقرير والسعر الفني
                             elif any(word in msg_text for word in ["سعر", "تحليل", "وضع", "استراتيجية", "/tawsiya"]):
                                 report = get_comprehensive_market_report()
                                 send_telegram_message(report)
                             elif any(word in msg_text for word in ["خبر", "اخبار", "/news"]):
                                 send_telegram_message("📰 **حالة الأخبار والأسواق:** المتابعة مستمرة لكافة مستويات الخصم والدورات الفلكية والزمنية لحظياً.")
                             elif msg_text in ["/start", "مرحبا", "هلا", "شغال"]:
-                                send_telegram_message("أهلاً بك يا سليم! 🤖 تم تفعيل البوت بنجاح.\n\n👉 اكتب **سعر** للحصول على التقرير الفني والفلكي.\n👉 اكتب **توصية سريعة** لفحص السوق فوراً وجلب أحدث صفقة متاحة.")
+                                send_telegram_message("أهلاً بك يا سليم! 🤖 تم تحديث البوت ليعمل على **السعر الفوري (Spot Gold)**.\n\n👉 اكتب **سعر** لجلب السعر الفعلي المطابق لمنصتك.\n👉 اكتب **توصية سريعة** لفحص السوق فوراً.")
         except Exception as e:
             print(f"خطأ في المستمع: {e}")
             time.sleep(3)
@@ -252,7 +251,7 @@ if __name__ == "__main__":
     threading.Thread(target=run_http_server, daemon=True).start()
     threading.Thread(target=telegram_listener, daemon=True).start()
 
-    send_telegram_message("🚀 **تم تشغيل بوت التداول المتكامل مع ميزة (التوصيات السريعة) بنجاح!**")
+    send_telegram_message("🚀 **تم تحديث وتشغيل بوت التداول على السعر الفوري (Spot XAUUSD) بنجاح!**")
 
     last_trade_time = 0
 
@@ -261,7 +260,6 @@ if __name__ == "__main__":
             current_time = time.time()
             if is_market_open():
                 trade_message = analyze_smc_smart_trades()
-                # إرسال التوصية تلقائياً إذا انطبقت الشروط تماماً
                 if trade_message and "💎" in trade_message and (current_time - last_trade_time > 1800):
                     send_telegram_message(trade_message)
                     last_trade_time = current_time
