@@ -10,7 +10,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 
 TELEGRAM_TOKEN = "8347268155:AAH3oQ4MaH1rWxvoEgoEOLfgPI_DfRAsNBY"
 CHAT_ID = "1347502348"
-SYMBOL = "GC=F"
+SYMBOL = "XAUUSD=X"  # تم تعديله إلى الذهب الفوري Spot Gold لتطابق السعر مع المنصة
 
 try:
     requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/deleteWebhook")
@@ -137,16 +137,17 @@ def analyze_all_strategies():
         prev_row = df.iloc[-2]
 
         price = round(float(last_row['Close']), 2)
+        fib_382 = float(last_row['Fib_382'])
         fib_500 = float(last_row['Fib_500'])
         fib_618 = float(last_row['Fib_618'])
         swing_high = float(last_row['Swing_High'])
         swing_low = float(last_row['Swing_Low'])
         rsi = float(last_row['RSI'])
 
-        # شرط الشراء: وصول السعر لمنطقة الطلب/الفيبوناتشي (0.50 أو 0.618) مع ارتداد صاعد
+        # شرط الشراء
         is_buy_signal = (price <= fib_500) and (prev_row['Close'] < price) and (rsi < 45)
         
-        # شرط البيع: وصول السعر لمنطقة العرض أفقياً وأعلى الفيبوناتشي مع ارتداد هابط
+        # شرط البيع
         is_sell_signal = (price >= fib_382) and (prev_row['Close'] > price) and (rsi > 65)
 
         if is_buy_signal:
@@ -192,7 +193,7 @@ def telegram_listener():
                         elif any(word in msg_text for word in ["خبر", "اخبار", "/news"]):
                             send_telegram_message("📰 **حالة الأخبار:** معالجة مستويات العرض والطلب والفيبوناتشي مستمرة تلقائياً.")
                         elif msg_text in ["/start", "مرحبا", "هلا", "شغال"]:
-                            send_telegram_message("أهلاً بك يا سليم! 🤖 تم دمج استراتيجيات **العرض والطلب + الفيبوناتشي + SMC** بنجاح. اكتب **سعر** للتحليل المباشر.")
+                            send_telegram_message("أهلاً بك! 🤖 تم تحديث رمز الذهب ليتطابق مع سعر الذهب الفوري (Spot Gold). اكتب **سعر** للتحليل.")
         except Exception:
             pass
         time.sleep(1)
@@ -201,7 +202,7 @@ if __name__ == "__main__":
     threading.Thread(target=run_http_server, daemon=True).start()
     threading.Thread(target=telegram_listener, daemon=True).start()
 
-    send_telegram_message("✅ **تم تحديث البوت ودمج استراتيجيات (العرض والطلب + الفيبوناتشي 0.382/0.5/0.618 + SMC) بنجاح!**")
+    send_telegram_message("✅ **تم تحديث البوت وضبط رمز السعر على الذهب الفوري (Spot Gold) بنجاح!**")
 
     last_trade_time = 0
 
