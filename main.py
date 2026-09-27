@@ -48,16 +48,17 @@ def get_realtime_gold_price():
         res = requests.get("https://api.exchangerate-api.com/v4/latest/XAU", timeout=5).json()
         if "rates" in res and "USD" in res["rates"]:
             price = 1 / res["rates"]["USD"]
-            if 1500 < price < 4000:
-                return round(price, 2)
+            if 1500 < price < 5000:
+                # تصحيح الفارق ليتطابق مع منصات التداول الحية (إضافة 16 دولاراً حسب مطابقتك الحالية)
+                return round(price + 16.0, 2)
     except Exception:
         pass
-    return 2658.50
+    return 4270.00
 
 def generate_market_dataframe(current_price):
     dates = pd.date_range(end=datetime.now(), periods=30, freq='15min')
     prices = [current_price + (i * 0.2) - 3 for i in range(30)]
-    prices[-1] = current_price  # السعر الحالي بدقة
+    prices[-1] = current_price  # السعر الحالي بدقة متطابقة
     
     df = pd.DataFrame({
         'Open': [p - 0.5 for p in prices],
@@ -100,7 +101,7 @@ def get_live_market_status():
         return f"""📊 **تقرير الذهب الشامل (XAU/USD):**
 
 🔒 **حالة السوق:** {market_status_text}
-💰 **السعر الحالي المباشر:** `{price}$`
+💰 **السعر الحالي المطابق لمنصتك:** `{price}$`
 📉 **مؤشر EMA:** `{ema_50}$` ({trend})
 🎯 **مستوى 50% فيبوناتشي:** `{fib_500}$`
 🏷️ **التقييم:** {zone_status}
@@ -157,7 +158,7 @@ def telegram_listener():
                             reply = get_live_market_status()
                             send_telegram_message(reply)
                         elif msg_text in ["/start", "مرحبا", "هلا", "شغال"]:
-                            send_telegram_message("أهلاً بك! البوت جاهز ويعمل بكفاءة.")
+                            send_telegram_message("أهلاً بك! تم ضبط مطابقة الأسعار مع المنصة بنجاح.")
         except Exception:
             pass
         time.sleep(1)
@@ -166,7 +167,7 @@ if __name__ == "__main__":
     threading.Thread(target=run_http_server, daemon=True).start()
     threading.Thread(target=telegram_listener, daemon=True).start()
 
-    send_telegram_message("✅ تم تحديث وتشغيل البوت بنجاح!")
+    send_telegram_message("✅ تم تحديث البوت وضبط تطابق السعر مع المنصة بنجاح!")
 
     last_trade_time = 0
 
