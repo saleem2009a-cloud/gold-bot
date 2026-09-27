@@ -10,9 +10,8 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 
 TELEGRAM_TOKEN = "8347268155:AAH3oQ4MaH1rWxvoEgoEOLfgPI_DfRAsNBY"
 CHAT_ID = "1347502348"
-SYMBOL = "GC=F"
+SYMBOL = "XAUUSD=X"  # رمز الذهب الفوري المباشر الدقيق
 
-# إلغاء أي Webhook قديم لتفادي تعليق الرسائل الواردة
 try:
     requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/deleteWebhook")
 except Exception:
@@ -34,18 +33,28 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"Gold Bot Server Active")
+        self.wfile.write(b"Gold Bot Active")
 
 def run_http_server():
     port = int(os.environ.get("PORT", 8080))
     server = HTTPServer(("0.0.0.0", port), SimpleHTTPRequestHandler)
     server.serve_forever()
 
-def get_economic_news_summary():
-    return """📰 **تقرير الأخبار الاقتصادية والتقويم:**
+def is_market_open():
+    # معرفة ما إذا كان السوق مغلقاً (السبت = 5, الأحد = 6)
+    weekday = datetime.now(timezone.utc).weekday()
+    if weekday in [5, 6]:
+        return False
+    return True
 
-• **أسعار الفائدة والتضخم:** متابعة تصريحات الفيدرالي الأمريكي وبيانات التضخم CPI.
-• **حالة المخاطر:** مستقرة حالياً 🟢.
+def get_economic_news_summary():
+    if not is_market_open():
+        return "🔴 **السوق مغلق حالياً (عطلة نهاية الأسبوع)**\n\n📰 **ملخص الأخبار:** لا توجد بيانات اقتصادية حية صادرة اليوم. يفتتح السوق مساء الأحد/فجر الاثنين."
+    
+    return """📰 **تقرير الأخبار الاقتصادية:**
+
+• **أسعار الفائدة والتضخم:** متابعة تصريحات الفيدرالي وبيانات CPI.
+• **حالة المخاطر:** مستقرة حالياً 🟢 بدون أخبار عالية الخطورة.
 • **توصية:** انتبه لأوقات بيانات NFP والوظائف الفيدرالية."""
 
 def get_moon_phase(dt):
@@ -54,9 +63,9 @@ def get_moon_phase(dt):
     angle = ((days % 29.53058770576) / 29.53058770576) * 360.0
 
     if angle < 15 or angle > 345:
-        return "محاق (New Moon) 🌑 - منطقة انعكاس زمني فلكي"
+        return "محاق (New Moon) 🌑"
     elif 165 < angle < 195:
-        return "بدر (Full Moon) 🌕 - ذروة التذبذب والسيولة"
+        return "بدر (Full Moon) 🌕"
     else:
         return "مسار فلكي اعتيادي 🌙"
 
@@ -100,9 +109,12 @@ def calculate_indicators(df):
 
 def get_live_market_status():
     try:
+        market_open = is_market_open()
+        market_status_text = "🟢 **السوق مفتوح**" if market_open else "🔴 **السوق مغلق (عطلة نهاية الأسبوع)**"
+
         data = yf.download(tickers=SYMBOL, period="5d", interval="15m", progress=False)
         if data.empty:
-            return "جاري تحديث بيانات الذهب، حاول بعد قليل..."
+            return "جاري تحديث البيانات، حاول بعد قليل..."
 
         if isinstance(data.columns, pd.MultiIndex):
             data.columns = data.columns.get_level_values(0)
@@ -119,18 +131,22 @@ def get_live_market_status():
         astro_phase = get_moon_phase(now)
         time_session, is_time_turn = analyze_time_cycles()
 
-        return f"""📊 **تقرير الذهب اللحظي (XAU/USD):**
+        return f"""📊 **تقرير الذهب الفوري (XAU/USD):**
 
-💰 **السعر الحالي:** `{price}$`
+🔒 **حالة السوق:** {market_status_text}
+💰 **السعر ({'الحالي' if market_open else 'إغلاق الجمعة'}):** `{price}$`
 📈 **الاتجاه العام (SMA50):** {trend}
 📉 **مؤشر RSI:** {rsi}
-⏳ **الجلسة الحالية:** {time_session}
-⚠️ **انعكاس زمني (Gann):** {"نعم ⚠️" if is_time_turn else "لا 🟢"}
-🌌 **الدورة القمرية:** {astro_phase}"""
+⏳ **الجلسة:** {time_session}
+🌌 **الدورة القمرية:** {astro_phase}
+
+💡 *تلاحظ: يتم إيقاف إرسال التوصيات التلقائية أثناء إغلاق السوق وحتّى افتتاح التداول فجر الاثنين.*"""
     except Exception as e:
         return f"حدث خطأ في البيانات: {e}"
 
 def analyze_scalping():
+    if not is_market_open():
+        return None
     try:
         data = yf.download(tickers=SYMBOL, period="1d", interval="5m", progress=False)
         if data.empty or len(data) < 50:
@@ -159,6 +175,8 @@ def analyze_scalping():
     return None
 
 def analyze_gold_main():
+    if not is_market_open():
+        return None
     try:
         data = yf.download(tickers=SYMBOL, period="5d", interval="15m", progress=False)
         if data.empty:
@@ -195,7 +213,6 @@ def analyze_gold_main():
         pass
     return None
 
-# الاستماع المستقل والدقيق للرسائل
 def telegram_listener():
     offset = 0
     while True:
@@ -215,7 +232,7 @@ def telegram_listener():
                             reply = get_economic_news_summary()
                             send_telegram_message(reply)
                         elif msg_text in ["/start", "مرحبا", "هلا", "شغال"]:
-                            send_telegram_message("أهلاً بك يا سليم! 🤖 اكتب **سعر** للتحليل اللحظي أو **اخبار** للتقويم الاقتصادي.")
+                            send_telegram_message("أهلاً بك يا سليم! 🤖 اكتب **سعر** للتحليل اللحظي وسأبين لك حالة السوق فوراً.")
         except Exception:
             pass
         time.sleep(1)
@@ -224,7 +241,7 @@ if __name__ == "__main__":
     threading.Thread(target=run_http_server, daemon=True).start()
     threading.Thread(target=telegram_listener, daemon=True).start()
 
-    send_telegram_message("✅ **تم الشبيك والتحديث بنجاح!**\nارسل الآن كلمة 'سعر' أو 'اخبار' واختبر الرد المباشر.")
+    send_telegram_message("✅ **تم تحديث الرمز لحساب الذهب الفوري (XAUUSD=X) وفحص حالة العطلة الأسبوعية!**")
 
     last_main_signal_time = 0
     last_scalp_signal_time = 0
