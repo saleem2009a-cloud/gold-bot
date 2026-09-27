@@ -152,8 +152,6 @@ def get_comprehensive_market_report():
 
 def analyze_smc_smart_trades():
     """فحص السوق لاكتشاف الصفقات بناءً على شروط دقيقة لاستراتيجية SMC"""
-    if not is_market_open():
-        return None
     try:
         data = yf.download(tickers=SYMBOL, period="5d", interval="15m", progress=False)
         if data.empty or len(data) < 30:
@@ -202,9 +200,13 @@ def analyze_smc_smart_trades():
 🛑 **وقف الخسارة (SL):** `{sl}$`
 📊 **مستوى 50%:** `{round(discount, 2)}$` | **RSI:** `{round(rsi, 2)}`
 ⏳ **الجلسة:** {time_session} | 🌌 **الفلك:** {astro_phase}"""
-    except Exception:
-        pass
-    return None
+        
+        else:
+            return f"""⚖️ **تحليل التوصية السريعة الحالية:**
+السعر يتحرك حالياً عند `{price}$`. 
+🏷️ **التقييم:** لم تتحقق شروط الانعكاس الكاملة (Discount/Premium مع تقاطع مؤشر RSI)، السعر في منطقة استقرار حالياً. انتظر الفرصة أو راسلني لاحقاً."""
+    except Exception as e:
+        return f"تعذر إجراء التحليل السريع حالياً: {e}"
 
 def telegram_listener():
     """مستمع أوتوماتيكي لرسائل التيليجرام للاستجابة الفورية للأوامر"""
@@ -229,13 +231,18 @@ def telegram_listener():
                         sender_chat_id = str(update["message"]["chat"]["id"])
                         
                         if sender_chat_id == CHAT_ID:
-                            if any(word in msg_text for word in ["سعر", "تحليل", "وضع", "توصية", "استراتيجية", "/tawsiya"]):
+                            # طلب توصية سريعة فورية
+                            if any(word in msg_text for word in ["توصية سريعة", "فرصة", "صفقة", "/fast", "/signal"]):
+                                quick_signal = analyze_smc_smart_trades()
+                                send_telegram_message(quick_signal)
+                            # طلب التقرير والسعر الفني
+                            elif any(word in msg_text for word in ["سعر", "تحليل", "وضع", "استراتيجية", "/tawsiya"]):
                                 report = get_comprehensive_market_report()
                                 send_telegram_message(report)
                             elif any(word in msg_text for word in ["خبر", "اخبار", "/news"]):
                                 send_telegram_message("📰 **حالة الأخبار والأسواق:** المتابعة مستمرة لكافة مستويات الخصم والدورات الفلكية والزمنية لحظياً.")
                             elif msg_text in ["/start", "مرحبا", "هلا", "شغال"]:
-                                send_telegram_message("أهلاً بك يا سليم! 🤖 تم تفعيل بوت التداول الشامل (SMC + الفلكي + الفني) بنجاح. اكتب **سعر** أو **تحليل** للحصول على التقرير الكامل فوراً.")
+                                send_telegram_message("أهلاً بك يا سليم! 🤖 تم تفعيل البوت بنجاح.\n\n👉 اكتب **سعر** للحصول على التقرير الفني والفلكي.\n👉 اكتب **توصية سريعة** لفحص السوق فوراً وجلب أحدث صفقة متاحة.")
         except Exception as e:
             print(f"خطأ في المستمع: {e}")
             time.sleep(3)
@@ -245,17 +252,19 @@ if __name__ == "__main__":
     threading.Thread(target=run_http_server, daemon=True).start()
     threading.Thread(target=telegram_listener, daemon=True).start()
 
-    send_telegram_message("🚀 **تم تشغيل بوت التداول المتكامل (SMC, المؤشرات, الدورات الزمنية والفلكية) بنجاح وجاهز للعمل!**")
+    send_telegram_message("🚀 **تم تشغيل بوت التداول المتكامل مع ميزة (التوصيات السريعة) بنجاح!**")
 
     last_trade_time = 0
 
     while True:
         try:
             current_time = time.time()
-            trade_message = analyze_smc_smart_trades()
-            if trade_message and (current_time - last_trade_time > 1800):
-                send_telegram_message(trade_message)
-                last_trade_time = current_time
+            if is_market_open():
+                trade_message = analyze_smc_smart_trades()
+                # إرسال التوصية تلقائياً إذا انطبقت الشروط تماماً
+                if trade_message and "💎" in trade_message and (current_time - last_trade_time > 1800):
+                    send_telegram_message(trade_message)
+                    last_trade_time = current_time
         except Exception as e:
             print(f"خطأ في حلقة المراقبة الرئيسية: {e}")
 
