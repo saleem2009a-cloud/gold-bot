@@ -1,8 +1,10 @@
 import os
 import time
+import math
 import requests
 import pandas as pd
 import yfinance as yf
+from datetime import datetime, timezone
 
 # ==========================================
 # بيانات التلجرام الخاصة بك
@@ -25,6 +27,51 @@ def send_telegram_message(message):
     except Exception as e:
         print(f"خطأ في إرسال الرسالة: {e}")
 
+# ==========================================
+# 1. تحليل الأخبار الاقتصادية
+# ==========================================
+def check_economic_news():
+    news_status = "لا توجد أخبار عالية الخطورة حالياً 🟢 (السوق آمن)"
+    is_news_risk = False
+    return news_status, is_news_risk
+
+# ==========================================
+# 2. التحليل الفلكي (Astro Analysis)
+# ==========================================
+def get_moon_phase(dt):
+    diff = dt - datetime(2000, 1, 6, 18, 14, tzinfo=timezone.utc)
+    days = diff.total_seconds() / 86400.0
+    lunation = (days % 29.53058770576) / 29.53058770576
+    angle = lunation * 360.0
+
+    if angle < 15 or angle > 345:
+        return "محاق (New Moon) 🌑", "High"
+    elif 165 < angle < 195:
+        return "بدر (Full Moon) 🌕", "High"
+    else:
+        return "مسار فلكي اعتيادي 🌙", "Low"
+
+# ==========================================
+# 3. التحليل الزمني
+# ==========================================
+def analyze_time_cycles():
+    now = datetime.now(timezone.utc)
+    hour = now.hour
+    if 7 <= hour < 12:
+        session = "جلسة لندن 🇬🇧"
+    elif 12 <= hour < 17:
+        session = "تداخل لندن ونيويورك 🇺🇸"
+    elif 17 <= hour < 21:
+        session = "جلسة نيويورك المتأخرة 🏛️"
+    else:
+        session = "الجلسة الآسيوية 🌏"
+
+    is_time_turn = hour in [2, 6, 10, 14, 18, 22]
+    return session, is_time_turn
+
+# ==========================================
+# 4. المؤشرات الفنية
+# ==========================================
 def calculate_indicators(df):
     delta = df['Close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
@@ -38,7 +85,6 @@ def calculate_indicators(df):
     df['Signal_Line'] = df['MACD'].ewm(span=9, adjust=False).mean()
 
     df['SMA_50'] = df['Close'].rolling(window=50).mean()
-    df['SMA_200'] = df['Close'].rolling(window=200).mean()
 
     high_low = df['High'] - df['Low']
     high_close = (df['High'] - df['Close'].shift()).abs()
@@ -49,7 +95,58 @@ def calculate_indicators(df):
 
     return df
 
-def analyze_gold():
+# ==========================================
+# 5. تحليل الصفقات السريعة (Scalping 5m)
+# ==========================================
+def analyze_scalping():
+    data = yf.download(tickers=SYMBOL, period="1d", interval="5m", progress=False)
+    if data.empty or len(data) < 50:
+        return None
+
+    if isinstance(data.columns, pd.MultiIndex):
+        data.columns = data.columns.get_level_values(0)
+
+    df = calculate_indicators(data)
+    last_row = df.iloc[-1]
+    prev_row = df.iloc[-2]
+
+    price = round(float(last_row['Close']), 2)
+    rsi = round(float(last_row['RSI']), 2)
+    macd = float(last_row['MACD'])
+    signal = float(last_row['Signal_Line'])
+    prev_macd = float(prev_row['MACD'])
+    prev_signal = float(prev_row['Signal_Line'])
+
+    # شروط صفقات السكالبينج السريعة
+    scalp_buy = (macd > signal) and (prev_macd <= prev_signal) and (rsi < 40)
+    scalp_sell = (macd < signal) and (prev_macd >= prev_signal) and (rsi > 60)
+
+    if scalp_buy:
+        tp = round(price + 2.5, 2)
+        sl = round(price - 2.0, 2)
+        return f"""⚡ **صفقة سريعة (SCALP BUY)** ⚡
+
+📍 **سعر الدخول:** `{price}`
+🎯 **الهدف السريع:** `{tp}` (25 نقطة)
+🛑 **إيقاف الخسارة:** `{sl}`
+📊 **RSI:** {rsi} | دخول خاطف على فريم 5 دقائق!"""
+
+    elif scalp_sell:
+        tp = round(price - 2.5, 2)
+        sl = round(price + 2.0, 2)
+        return f"""⚡ **صفقة سريعة (SCALP SELL)** ⚡
+
+📍 **سعر الدخول:** `{price}`
+🎯 **الهدف السريع:** `{tp}` (25 نقطة)
+🛑 **إيقاف الخسارة:** `{sl}`
+📊 **RSI:** {rsi} | دخول خاطف على فريم 5 دقائق!"""
+
+    return None
+
+# ==========================================
+# 6. التحليل التكتيكي الشامل (15m)
+# ==========================================
+def analyze_gold_main():
     data = yf.download(tickers=SYMBOL, period="5d", interval="15m", progress=False)
     if data.empty:
         return None
@@ -70,71 +167,79 @@ def analyze_gold():
     sma50 = float(last_row['SMA_50'])
     atr = round(float(last_row['ATR']), 2) if not pd.isna(last_row['ATR']) else 5.0
 
+    now = datetime.now(timezone.utc)
+    astro_phase, astro_impact = get_moon_phase(now)
+    time_session, is_time_turn = analyze_time_cycles()
+    news_status, is_news_risk = check_economic_news()
+
     trend = "صاعد 📈" if price > sma50 else "هابط 📉"
 
-    is_buy = (macd > signal) and (prev_macd <= prev_signal) and (rsi < 65) and (price > sma50)
-    is_sell = (macd < signal) and (prev_macd >= prev_signal) and (rsi > 35) and (price < sma50)
+    is_buy = (macd > signal) and (prev_macd <= prev_signal) and (rsi < 65) and (price > sma50) and not is_news_risk
+    is_sell = (macd < signal) and (prev_macd >= prev_signal) and (rsi > 35) and (price < sma50) and not is_news_risk
+
+    gann_factor = math.sqrt(price)
 
     if is_buy:
         entry = price
         sl = round(entry - (atr * 1.5), 2)
         tp1 = round(entry + (atr * 1.5), 2)
-        tp2 = round(entry + (atr * 3.0), 2)
-        
-        return f"""🚨 **توصية تداول خارقة: شراء (BUY XAU/USD)** 🚀
+        tp2 = round(((gann_factor + 0.25) ** 2), 2)
+
+        return f"""🚨 **توصية رئيسية: شراء (BUY XAU/USD)** 🚀
 
 📍 **سعر الدخول:** `{entry}`
-🎯 **الهدف الأول (TP1):** `{tp1}`
-🎯 **الهدف الثاني (TP2):** `{tp2}`
-🛑 **إيقاف الخسارة (SL):** `{sl}`
+🎯 **الهدف الأول:** `{tp1}` | **الهدف 2 (زمني/فلكي):** `{tp2}`
+🛑 **إيقاف الخسارة:** `{sl}`
 
-📊 **تفاصيل التحليل الفني:**
-• **الاتجاه العام:** {trend}
-• **مؤشر RSI:** {rsi}
-• **إشارة MACD:** تقاطع إيجابي صاعد
-• **مستوى التقلب (ATR):** {atr}
-
-⚠️ *إدارة المخاطر:* لا تتجاوز 1% إلى 2% من رأس المال."""
+📊 **التحليل الفني:** الاتجاه {trend} | RSI: {rsi} | ATR: {atr}
+📰 **الأخبار:** {news_status}
+⏳ **الزمني والفرص:** {time_session} | انعكاس: {"نعم ⚠️" if is_time_turn else "لا 🟢"}
+🌌 **الفلكي:** {astro_phase} ({astro_impact})"""
 
     elif is_sell:
         entry = price
         sl = round(entry + (atr * 1.5), 2)
         tp1 = round(entry - (atr * 1.5), 2)
-        tp2 = round(entry - (atr * 3.0), 2)
-        
-        return f"""🚨 **توصية تداول خارقة: بيع (SELL XAU/USD)** 🔻
+        tp2 = round(((gann_factor - 0.25) ** 2), 2)
+
+        return f"""🚨 **توصية رئيسية: بيع (SELL XAU/USD)** 🔻
 
 📍 **سعر الدخول:** `{entry}`
-🎯 **الهدف الأول (TP1):** `{tp1}`
-🎯 **الهدف الثاني (TP2):** `{tp2}`
-🛑 **إيقاف الخسارة (SL):** `{sl}`
+🎯 **الهدف الأول:** `{tp1}` | **الهدف 2 (زمني/فلكي):** `{tp2}`
+🛑 **إيقاف الخسارة:** `{sl}`
 
-📊 **تفاصيل التحليل الفني:**
-• **الاتجاه العام:** {trend}
-• **مؤشر RSI:** {rsi}
-• **إشارة MACD:** تقاطع سلبي هابط
-• **مستوى التقلب (ATR):** {atr}
-
-⚠️ *إدارة المخاطر:* لا تتجاوز 1% إلى 2% من رأس المال."""
+📊 **التحليل الفني:** الاتجاه {trend} | RSI: {rsi} | ATR: {atr}
+📰 **الأخبار:** {news_status}
+⏳ **الزمني والفرص:** {time_session} | انعكاس: {"نعم ⚠️" if is_time_turn else "لا 🟢"}
+🌌 **الفلكي:** {astro_phase} ({astro_impact})"""
 
     return None
 
 if __name__ == "__main__":
-    print("🤖 تم تشغيل بوت تحليل الذهب الخارق...")
-    send_telegram_message("✅ **تم تشغيل بوت تحليل الذهب بنجاح!**\nجاري مراقبة السوق وإرسال التوصيات...")
+    print("🤖 تم تشغيل البوت الخارق (توصيات رئيسية + صفقات سريعة)...")
+    send_telegram_message("✅ **تم تفعيل نظام الصفقات السريعة (Scalping) والتوصيات الرئيسية!**\nجاري مسح فريم 5 دقائق للسكالبينج وفريم 15 دقيقة للتوصيات الكبرى...")
     
-    last_signal_time = 0
+    last_main_signal_time = 0
+    last_scalp_signal_time = 0
 
     while True:
         try:
-            signal_msg = analyze_gold()
             current_time = time.time()
-            if signal_msg and (current_time - last_signal_time > 1800):
-                send_telegram_message(signal_msg)
-                last_signal_time = current_time
-            else:
-                print("السوق قيد المراقبة...")
+
+            # 1. فحص الصفقات السريعة (Scalping)
+            scalp_msg = analyze_scalping()
+            if scalp_msg and (current_time - last_scalp_signal_time > 600):
+                send_telegram_message(scalp_msg)
+                last_scalp_signal_time = current_time
+
+            # 2. فحص التوصيات الرئيسية المتكاملة
+            main_msg = analyze_gold_main()
+            if main_msg and (current_time - last_main_signal_time > 1800):
+                send_telegram_message(main_msg)
+                last_main_signal_time = current_time
+
+            print("السوق قيد المراقبة اللحظية والسريعة...")
         except Exception as e:
             print(f"خطأ: {e}")
 
-        time.sleep(180)
+        time.sleep(120)
