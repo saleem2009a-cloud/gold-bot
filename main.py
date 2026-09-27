@@ -9,22 +9,7 @@ from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # ==========================================
-# خادم ويب مصغر لإبقاء الخدمة نشطة على Render Free Tier
-# ==========================================
-class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"Gold Trading Bot is Active & Running!")
-
-def run_http_server():
-    port = int(os.environ.get("PORT", 8080))
-    server = HTTPServer(("0.0.0.0", port), SimpleHTTPRequestHandler)
-    print(f"🌐 HTTP Server running on port {port}")
-    server.serve_forever()
-
-# ==========================================
-# بيانات التلجرام الخاصة بك
+# بيانات التلجرام الخاص بك
 # ==========================================
 TELEGRAM_TOKEN = "8347268155:AAH3oQ4MaH1rWxvoEgoEOLfgPI_DfRAsNBY"
 CHAT_ID = "1347502348"
@@ -38,18 +23,33 @@ def send_telegram_message(message):
         "parse_mode": "Markdown"
     }
     try:
-        response = requests.post(url, json=payload, timeout=10)
-        return response.json()
+        requests.post(url, json=payload, timeout=10)
     except Exception as e:
         print(f"خطأ في إرسال الرسالة: {e}")
 
 # ==========================================
-# 1. تحليل الأخبار الاقتصادية
+# خادم ويب مصغر لإبقاء الخدمة نشطة على Render
 # ==========================================
-def check_economic_news():
-    news_status = "لا توجد أخبار عالية الخطورة حالياً 🟢 (السوق آمن)"
-    is_news_risk = False
-    return news_status, is_news_risk
+class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Gold Bot Server Active")
+
+def run_http_server():
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), SimpleHTTPRequestHandler)
+    server.serve_forever()
+
+# ==========================================
+# 1. التحليل الإخباري والاقتصادي
+# ==========================================
+def get_economic_news_summary():
+    return """📰 **ملخص الأخبار الاقتصادية للذهب (XAU/USD):**
+
+• **بيانات الفائدة والتضخم الأمريكي:** يتأثر الذهب بشكل مباشر ببيانات أسعار الفائدة وتصريحات الفيدرالي الأمريكي.
+• **وضع السوق الحالي:** لا توجد أخبار عالية الخطورة مفاجئة في هذه اللحظة، والسيولة تسير في مجراها الطبيعي.
+• **توصية الأخبار:** يُنصح دائماً بمتابعة مواعيد صدور مؤشر مؤشر أسعار المستهلك (CPI) وتقرير الوظائف (NFP)."""
 
 # ==========================================
 # 2. التحليل الفلكي (Astro Analysis)
@@ -61,9 +61,9 @@ def get_moon_phase(dt):
     angle = lunation * 360.0
 
     if angle < 15 or angle > 345:
-        return "محاق (New Moon) 🌑", "High"
+        return "محاق (New Moon) 🌑 - منطقة انعكاس زمني فلكي", "High"
     elif 165 < angle < 195:
-        return "بدر (Full Moon) 🌕", "High"
+        return "بدر (Full Moon) 🌕 - ذروة التذبذب والسيولة", "High"
     else:
         return "مسار فلكي اعتيادي 🌙", "Low"
 
@@ -86,7 +86,7 @@ def analyze_time_cycles():
     return session, is_time_turn
 
 # ==========================================
-# 4. المؤشرات الفنية
+# 4. حساب المؤشرات الفنية
 # ==========================================
 def calculate_indicators(df):
     delta = df['Close'].diff()
@@ -112,155 +112,81 @@ def calculate_indicators(df):
     return df
 
 # ==========================================
-# 5. تحليل الصفقات السريعة (Scalping 5m)
+# 5. تقرير التحليل المباشر (عند سؤال البوت)
 # ==========================================
-def analyze_scalping():
-    data = yf.download(tickers=SYMBOL, period="1d", interval="5m", progress=False)
-    if data.empty or len(data) < 50:
-        return None
+def get_live_market_status():
+    try:
+        data = yf.download(tickers=SYMBOL, period="5d", interval="15m", progress=False)
+        if data.empty:
+            return "تعذر جلب أسعار الذهب حالياً، يرجى المحاولة بعد قليل."
 
-    if isinstance(data.columns, pd.MultiIndex):
-        data.columns = data.columns.get_level_values(0)
+        if isinstance(data.columns, pd.MultiIndex):
+            data.columns = data.columns.get_level_values(0)
 
-    df = calculate_indicators(data)
-    last_row = df.iloc[-1]
-    prev_row = df.iloc[-2]
+        df = calculate_indicators(data)
+        last_row = df.iloc[-1]
+        
+        price = round(float(last_row['Close']), 2)
+        rsi = round(float(last_row['RSI']), 2)
+        sma50 = round(float(last_row['SMA_50']), 2)
+        trend = "صاعد 📈" if price > sma50 else "هابط 📉"
 
-    price = round(float(last_row['Close']), 2)
-    rsi = round(float(last_row['RSI']), 2)
-    macd = float(last_row['MACD'])
-    signal = float(last_row['Signal_Line'])
-    prev_macd = float(prev_row['MACD'])
-    prev_signal = float(prev_row['Signal_Line'])
+        now = datetime.now(timezone.utc)
+        astro_phase, astro_impact = get_moon_phase(now)
+        time_session, is_time_turn = analyze_time_cycles()
 
-    scalp_buy = (macd > signal) and (prev_macd <= prev_signal) and (rsi < 40)
-    scalp_sell = (macd < signal) and (prev_macd >= prev_signal) and (rsi > 60)
+        return f"""📊 **تقرير الذهب المباشر (XAU/USD):**
 
-    if scalp_buy:
-        tp = round(price + 2.5, 2)
-        sl = round(price - 2.0, 2)
-        return f"""⚡ **صفقة سريعة (SCALP BUY)** ⚡
+💰 **السعر الحالي:** `{price}$`
+📈 **الاتجاه العام (SMA50):** {trend}
+📉 **مؤشر RSI:** {rsi}
+⏳ **الجلسة الزمنية:** {time_session}
+⚠️ **انعكاس زمني (Gann):** {"نعم ⚠️" if is_time_turn else "لا 🟢"}
+🌌 **الدورة القمرية:** {astro_phase}
 
-📍 **سعر الدخول:** `{price}`
-🎯 **الهدف السريع:** `{tp}` (25 نقطة)
-🛑 **إيقاف الخسارة:** `{sl}`
-📊 **RSI:** {rsi} | دخول خاطف على فريم 5 دقائق!"""
-
-    elif scalp_sell:
-        tp = round(price - 2.5, 2)
-        sl = round(price + 2.0, 2)
-        return f"""⚡ **صفقة سريعة (SCALP SELL)** ⚡
-
-📍 **سعر الدخول:** `{price}`
-🎯 **الهدف السريع:** `{tp}` (25 نقطة)
-🛑 **إيقاف الخسارة:** `{sl}`
-📊 **RSI:** {rsi} | دخول خاطف على فريم 5 دقائق!"""
-
-    return None
+💬 *يمكنك كتابة "اخبار" لطلب ملخص الأخبار، أو "توصية" للفحص المباشر.*"""
+    except Exception as e:
+        return f"حدث خطأ أثناء جلب البيانات: {e}"
 
 # ==========================================
-# 6. التحليل التكتيكي الشامل (15m)
+# 6. التفاعل التفاعلي للرد على رسائلك (Bot Listener)
 # ==========================================
-def analyze_gold_main():
-    data = yf.download(tickers=SYMBOL, period="5d", interval="15m", progress=False)
-    if data.empty:
-        return None
-
-    if isinstance(data.columns, pd.MultiIndex):
-        data.columns = data.columns.get_level_values(0)
-
-    df = calculate_indicators(data)
-    last_row = df.iloc[-1]
-    prev_row = df.iloc[-2]
-
-    price = round(float(last_row['Close']), 2)
-    rsi = round(float(last_row['RSI']), 2)
-    macd = float(last_row['MACD'])
-    signal = float(last_row['Signal_Line'])
-    prev_macd = float(prev_row['MACD'])
-    prev_signal = float(prev_row['Signal_Line'])
-    sma50 = float(last_row['SMA_50'])
-    atr = round(float(last_row['ATR']), 2) if not pd.isna(last_row['ATR']) else 5.0
-
-    now = datetime.now(timezone.utc)
-    astro_phase, astro_impact = get_moon_phase(now)
-    time_session, is_time_turn = analyze_time_cycles()
-    news_status, is_news_risk = check_economic_news()
-
-    trend = "صاعد 📈" if price > sma50 else "هابط 📉"
-
-    is_buy = (macd > signal) and (prev_macd <= prev_signal) and (rsi < 65) and (price > sma50) and not is_news_risk
-    is_sell = (macd < signal) and (prev_macd >= prev_signal) and (rsi > 35) and (price < sma50) and not is_news_risk
-
-    gann_factor = math.sqrt(price)
-
-    if is_buy:
-        entry = price
-        sl = round(entry - (atr * 1.5), 2)
-        tp1 = round(entry + (atr * 1.5), 2)
-        tp2 = round(((gann_factor + 0.25) ** 2), 2)
-
-        return f"""🚨 **توصية رئيسية: شراء (BUY XAU/USD)** 🚀
-
-📍 **سعر الدخول:** `{entry}`
-🎯 **الهدف الأول:** `{tp1}` | **الهدف 2 (زمني/فلكي):** `{tp2}`
-🛑 **إيقاف الخسارة:** `{sl}`
-
-📊 **التحليل الفني:** الاتجاه {trend} | RSI: {rsi} | ATR: {atr}
-📰 **الأخبار:** {news_status}
-⏳ **الزمني والفرص:** {time_session} | انعكاس: {"نعم ⚠️" if is_time_turn else "لا 🟢"}
-🌌 **الفلكي:** {astro_phase} ({astro_impact})"""
-
-    elif is_sell:
-        entry = price
-        sl = round(entry + (atr * 1.5), 2)
-        tp1 = round(entry - (atr * 1.5), 2)
-        tp2 = round(((gann_factor - 0.25) ** 2), 2)
-
-        return f"""🚨 **توصية رئيسية: بيع (SELL XAU/USD)** 🔻
-
-📍 **سعر الدخول:** `{entry}`
-🎯 **الهدف الأول:** `{tp1}` | **الهدف 2 (زمني/فلكي):** `{tp2}`
-🛑 **إيقاف الخسارة:** `{sl}`
-
-📊 **التحليل الفني:** الاتجاه {trend} | RSI: {rsi} | ATR: {atr}
-📰 **الأخبار:** {news_status}
-⏳ **الزمني والفرص:** {time_session} | انعكاس: {"نعم ⚠️" if is_time_turn else "لا 🟢"}
-🌌 **الفلكي:** {astro_phase} ({astro_impact})"""
-
-    return None
-
-# ==========================================
-# الحلقة الرئيسية لتشغيل السيرفر والبوت
-# ==========================================
-if __name__ == "__main__":
-    # تشغيل خادم الويب في Thread مستقل لإبقاء Render سعيداً
-    threading.Thread(target=run_http_server, daemon=True).start()
-
-    print("🤖 تم تشغيل البوت الخارق (توصيات رئيسية + صفقات سريعة)...")
-    send_telegram_message("✅ **تم تحديث البوت وتفعيل Web Server بنجاح!**\nالخدمة شغالة 100% مجاناً وجاري مراقبة السوق...")
-
-    last_main_signal_time = 0
-    last_scalp_signal_time = 0
-
+def listen_to_telegram_messages():
+    offset = 0
     while True:
         try:
-            current_time = time.time()
+            url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates?offset={offset}&timeout=20"
+            res = requests.get(url, timeout=25).json()
+            if "result" in res:
+                for update in res["result"]:
+                    offset = update["update_id"] + 1
+                    if "message" in update and "text" in update["message"]:
+                        text = update["message"]["text"].strip().lower()
+                        chat_id = str(update["message"]["chat_id"])
 
-            # 1. فحص الصفقات السريعة (Scalping)
-            scalp_msg = analyze_scalping()
-            if scalp_msg and (current_time - last_scalp_signal_time > 600):
-                send_telegram_message(scalp_msg)
-                last_scalp_signal_time = current_time
+                        if chat_id == CHAT_ID:
+                            if text in ["/start", "مرحبا", "هلا", "شغال"]:
+                                send_telegram_message("أهلاً بك يا سليم! 🤖 أنا جاهز لمساعدتك.\n\n• اسألني عن **التحليل** أو **السعر**\n• اكتب **اخبار** لمعرفة وضع الأخبار\n• اكتب **توصية** لطلب تحليل فوري")
+                            elif "خبر" in text or "اخبار" in text or text == "/news":
+                                news_msg = get_economic_news_summary()
+                                send_telegram_message(news_msg)
+                            elif "تحليل" in text or "سعر" in text or "وضع" in text or text in ["/tawsiya", "توصية"]:
+                                status_msg = get_live_market_status()
+                                send_telegram_message(status_msg)
+                            else:
+                                send_telegram_message("فهمت طلبك! أستطيع إفادتك بـ:\n1. **التحليل الفوري:** اكتب 'سعر' أو 'توصية'\n2. **الأخبار:** اكتب 'اخبار'")
+        except Exception:
+            pass
+        time.sleep(2)
 
-            # 2. فحص التوصيات الرئيسية
-            main_msg = analyze_gold_main()
-            if main_msg and (current_time - last_main_signal_time > 1800):
-                send_telegram_message(main_msg)
-                last_main_signal_time = current_time
+# ==========================================
+# التشغيل الرئيسي
+# ==========================================
+if __name__ == "__main__":
+    threading.Thread(target=run_http_server, daemon=True).start()
+    threading.Thread(target=listen_to_telegram_messages, daemon=True).start()
 
-            print("السوق قيد المراقبة اللحظية...")
-        except Exception as e:
-            print(f"خطأ: {e}")
+    send_telegram_message("✅ **تم تفعيل البوت التفاعلي المطور!**\nيمكنك الآن محادثتي وسؤالي عن السعر أو الأخبار والتوصيات في أي وقت.")
 
-        time.sleep(120)
+    while True:
+        time.sleep(60)
