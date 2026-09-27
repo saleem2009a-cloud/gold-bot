@@ -32,7 +32,7 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"Gold Bot - Full Pullback Buy/Sell Strategy Active")
+        self.wfile.write(b"Gold Bot - Full Strategy Active")
 
 def run_http_server():
     port = int(os.environ.get("PORT", 8080))
@@ -46,17 +46,13 @@ def is_market_open():
     return True
 
 # ==========================================
-# حساب المؤشرات واستراتيجية Pullback كاملة (Buy & Sell)
+# حساب المؤشرات واستراتيجية Pullback كاملة
 # ==========================================
 def calculate_advanced_indicators(df):
-    # 1. حساب EMA 50 لتحديد الاتجاه
     df['EMA_50'] = df['Close'].ewm(span=50, adjust=False).mean()
-
-    # 2. القمم والقيعان (Swing High & Swing Low)
     df['Swing_High'] = df['High'].rolling(window=20).max()
     df['Swing_Low'] = df['Low'].rolling(window=20).min()
 
-    # 3. فيبوناتشي (مستوى 50% لـ Discount & Premium Region)
     high_val = df['Swing_High']
     low_val = df['Swing_Low']
     diff = high_val - low_val
@@ -65,31 +61,36 @@ def calculate_advanced_indicators(df):
     df['Fib_382'] = high_val - (diff * 0.382)
     df['Fib_618'] = high_val - (diff * 0.618)
 
-    # 4. ألوان الشموع
     df['Is_Red'] = df['Close'] < df['Open']
     df['Is_Green'] = df['Close'] > df['Open']
 
     return df
 
 def fetch_spot_gold_data():
-    try:
-        ticker = yf.Ticker("XAUUSD=X")
-        df = ticker.history(period="1mo", interval="15m")
-        if not df.empty and float(df.iloc[-1]['Close']) < 3500:
-            return df
-    except Exception:
-        pass
+    """ جلب بيانات الذهب الفوري مع ضمان عدم إرجاع قيم فارغة حتى عند إغلاق السوق """
+    # محاولة 1: جلب بيانات الذهب الفوري اليومية/السريعة
+    for interval in ["15m", "1h", "1d"]:
+        try:
+            ticker = yf.Ticker("XAUUSD=X")
+            df = ticker.history(period="1mo", interval=interval)
+            if not df.empty and len(df) >= 5:
+                price = float(df.iloc[-1]['Close'])
+                if 1500 < price < 3500:
+                    return df
+        except Exception:
+            pass
 
+    # محاولة 2: استخدام API احتياطي مجاني في حال توقف yfinance أثناء العطلة
     try:
         res = requests.get("https://api.exchangerate-api.com/v4/latest/XAU", timeout=5).json()
         if "rates" in res and "USD" in res["rates"]:
             gold_price = 1 / res["rates"]["USD"]
             if 1500 < gold_price < 3500:
-                dates = pd.date_range(end=datetime.now(), periods=30)
+                dates = pd.date_range(end=datetime.now(), periods=30, freq='D')
                 df = pd.DataFrame({
                     'Open': [gold_price]*30,
-                    'High': [gold_price + 10]*30,
-                    'Low': [gold_price - 10]*30,
+                    'High': [gold_price + 5]*30,
+                    'Low': [gold_price - 5]*30,
                     'Close': [gold_price]*30,
                 }, index=dates)
                 return df
@@ -105,7 +106,7 @@ def get_live_market_status():
 
         df = fetch_spot_gold_data()
         if df is None or df.empty:
-            return "⚠️ تعذر جلب سعر الذهب الفوري حالياً، أعد المحاولة عند افتتاح السوق."
+            return "⚠️ تعذر جلب السعر حالياً من المصدر، يرجى المحاولة بعد قليل."
 
         df = calculate_advanced_indicators(df)
         last_row = df.iloc[-1]
@@ -116,17 +117,17 @@ def get_live_market_status():
         swing_low = round(float(last_row['Swing_Low']), 2) if not pd.isna(last_row['Swing_Low']) else price - 10
         swing_high = round(float(last_row['Swing_High']), 2) if not pd.isna(last_row['Swing_High']) else price + 10
 
-        trend = "ترند صاعد 📈" if price > ema_50 else "ترند هابط 📉"
+        trend = "ترند صاعد 📈" if price >= ema_50 else "ترند هابط 📉"
         
-        if price < fib_500:
+        if price <= fib_500:
             zone_status = "منطقة خصم الشراء (Discount Region - تحت Fib 50%) 🛒🟢"
         else:
             zone_status = "منطقة البيع المرتفعة (Premium Region - فوق Fib 50%) 📈🔴"
 
-        return f"""📊 **تقرير الذهب الشامل وفق الاستراتيجية الكاملة:**
+        return f"""📊 **تقرير الذهب الشامل (XAU/USD):**
 
 🔒 **حالة السوق:** {market_status_text}
-💰 **السعر الحالي:** `{price}$`
+💰 **السعر الحالي (الذهب الفوري):** `{price}$`
 📉 **مؤشر EMA 50:** `{ema_50}$` ({trend})
 🎯 **مستوى 50% فيبوناتشي:** `{fib_500}$`
 🏷️ **التقييم:** {zone_status}
@@ -136,7 +137,6 @@ def get_live_market_status():
         return f"حدث خطأ أثناء جلب السعر: {e}"
 
 def analyze_full_pullback_strategy():
-    """ تطبيق شروط الاستراتيجية الكاملة (شراء + بيع) """
     if not is_market_open():
         return None
     try:
@@ -146,10 +146,10 @@ def analyze_full_pullback_strategy():
 
         df = calculate_advanced_indicators(df)
 
-        c0 = df.iloc[-1]  # الشمعة الحالية (المفروض تكون التأكيدية)
-        c1 = df.iloc[-2]  # شمعة التصحيح 1
-        c2 = df.iloc[-3]  # شمعة التصحيح 2
-        c3 = df.iloc[-4]  # شمعة التصحيح 3
+        c0 = df.iloc[-1]
+        c1 = df.iloc[-2]
+        c2 = df.iloc[-3]
+        c3 = df.iloc[-4]
 
         price = float(c0['Close'])
         ema_50 = float(c0['EMA_50'])
@@ -157,47 +157,19 @@ def analyze_full_pullback_strategy():
         swing_low = float(c0['Swing_Low'])
         swing_high = float(c0['Swing_High'])
 
-        # === 1. شروط الشراء (BUY) ===
-        buy_cond1 = price > ema_50  # ترند صاعد
-        buy_cond2 = c1['Is_Red'] and c2['Is_Red'] and c3['Is_Red']  # 3 شموع حمراء تصحيحية
-        buy_cond3 = price < fib_500 or c1['Low'] < fib_500  # نزول تحت 50% فيبوناتشي
-        buy_cond4 = c0['Is_Green']  # شمعة خضراء تأكيدية
-
-        if buy_cond1 and buy_cond2 and buy_cond3 and buy_cond4:
+        # شراء
+        buy_cond = (price > ema_50) and (c1['Is_Red'] and c2['Is_Red'] and c3['Is_Red']) and (price < fib_500 or c1['Low'] < fib_500) and c0['Is_Green']
+        if buy_cond:
             sl = round(swing_low - 1.5, 2)
             tp = round(swing_high, 2)
-            return f"""🚀 **توصية شراء (BUY XAU/USD)** 🚀
+            return f"""🚀 **توصية شراء (BUY XAU/USD)** 🚀\n\n📍 **سعر الدخول:** `{round(price, 2)}$` \n🛑 **وقف الخسارة:** `{sl}$` \n🎯 **الهدف:** `{tp}$`"""
 
-📍 **سعر الدخول:** `{round(price, 2)}$`
-🟢 **السبب:**
- 1. الاتجاه صاعد (السعر فوق EMA 50)
- 2. اكتمل تصحيح 3 شموع حمراء
- 3. وصل لمنطقة الخصم (تحت 50% Fib)
- 4. ظهرت شمعة خضراء تأكيدية
-
-🛑 **وقف الخسارة (تحت الدعم):** `{sl}$`
-🎯 **الهدف الرئيسي:** `{tp}$`"""
-
-        # === 2. شروط البيع (SELL) ===
-        sell_cond1 = price < ema_50  # ترند هابط
-        sell_cond2 = c1['Is_Green'] and c2['Is_Green'] and c3['Is_Green']  # 3 شموع خضراء تصحيحية
-        sell_cond3 = price > fib_500 or c1['High'] > fib_500  # صعود فوق 50% فيبوناتشي
-        sell_cond4 = c0['Is_Red']  # شمعة حمراء تأكيدية
-
-        if sell_cond1 and sell_cond2 and sell_cond3 and sell_cond4:
+        # بيع
+        sell_cond = (price < ema_50) and (c1['Is_Green'] and c2['Is_Green'] and c3['Is_Green']) and (price > fib_500 or c1['High'] > fib_500) and c0['Is_Red']
+        if sell_cond:
             sl = round(swing_high + 1.5, 2)
             tp = round(swing_low, 2)
-            return f"""🔻 **توصية بيع (SELL XAU/USD)** 🔻
-
-📍 **سعر الدخول:** `{round(price, 2)}$`
-🔴 **السبب:**
- 1. الاتجاه هابط (السعر تحت EMA 50)
- 2. اكتمل تصحيح 3 شموع خضراء
- 3. وصل لمنطقة البيع المرتفعة (فوق 50% Fib)
- 4. ظهرت شمعة حمراء تأكيدية
-
-🛑 **وقف الخسارة (فوق المقاومة):** `{sl}$`
-🎯 **الهدف الرئيسي:** `{tp}$`"""
+            return f"""🔻 **توصية بيع (SELL XAU/USD)** 🔻\n\n📍 **سعر الدخول:** `{round(price, 2)}$` \n🛑 **وقف الخسارة:** `{sl}$` \n🎯 **الهدف:** `{tp}$`"""
 
     except Exception:
         pass
@@ -219,7 +191,7 @@ def telegram_listener():
                             reply = get_live_market_status()
                             send_telegram_message(reply)
                         elif msg_text in ["/start", "مرحبا", "هلا", "شغال"]:
-                            send_telegram_message("أهلاً بك! 🤖 تم تفعيل الاستراتيجية الكاملة (شراء + بيع) لـ EMA و Fib 50% و Pullback. اكتب **سعر** للتحليل.")
+                            send_telegram_message("أهلاً بك! 🤖 النظام جاهز ويعمل الآن. اكتب **سعر** للتحليل.")
         except Exception:
             pass
         time.sleep(1)
@@ -228,7 +200,7 @@ if __name__ == "__main__":
     threading.Thread(target=run_http_server, daemon=True).start()
     threading.Thread(target=telegram_listener, daemon=True).start()
 
-    send_telegram_message("✅ **تم تحديث البوت بالاستراتيجية الشاملة للبيع والشراء (EMA + Pullback 3 Candles + Fib 50% Discount/Premium + Confirmation)!**")
+    send_telegram_message("✅ **تم تحديث النظام وحل مشكلة جلب البيانات بشكل نهائي!**")
 
     last_trade_time = 0
 
