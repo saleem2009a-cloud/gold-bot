@@ -9,7 +9,7 @@ from datetime import datetime
 
 app = Flask(__name__)
 @app.route('/')
-def home(): return "V20 OB + Fibonacci 0.382 Confirmation"
+def home(): return "V21 OB+Fibo+Liquidity Sweep"
 
 def keep_alive():
     while True:
@@ -52,15 +52,7 @@ def get_market_data():
         r=requests.get("https://api.gold-api.com/price/XAU",timeout=5).json()
         data['gold_change']=r.get('ch',0)
     except: data['gold_change']=0
-    news=[]
-    try:
-        r=requests.get("https://nfs.faireconomy.media/ff_calendar_thisweek.json",timeout=6).json()
-        for ev in r[-30:]:
-            if ev.get('impact')=='High' and 'USD' in ev.get('country',''):
-                news.append(ev.get('title','')[:40])
-    except: pass
-    if not news: news=["لا اخبار قوية - حركة فنية"]
-    data['news']=news[:3]
+    data['news']=["لا اخبار قوية - حركة فنية"]
     return data
 
 def find_zones(candles):
@@ -77,31 +69,88 @@ def find_zones(candles):
     return zones[-20:]
 
 def calc_fibonacci(candles):
-    # مثل الفيديو: حدد القاع والقمة
     if len(candles)<50: return None
     highs=[float(c[2]) for c in candles[-50:]]
     lows=[float(c[3]) for c in candles[-50:]]
-    swing_high=max(highs)
-    swing_low=min(lows)
-    # وين كانو
-    high_idx=highs.index(swing_high)
-    low_idx=lows.index(swing_low)
-
+    swing_high=max(highs); swing_low=min(lows)
     diff=swing_high-swing_low
-    # مستويات فيبو التصحيحي
     levels={
-        "0%": swing_high if high_idx>low_idx else swing_low,
-        "23.6%": swing_high - diff*0.236 if high_idx>low_idx else swing_low + diff*0.236,
-        "38.2%": swing_high - diff*0.382 if high_idx>low_idx else swing_low + diff*0.382, # الاهم مثل الفيديو
-        "50%": swing_high - diff*0.5 if high_idx>low_idx else swing_low + diff*0.5,
-        "61.8%": swing_high - diff*0.618 if high_idx>low_idx else swing_low + diff*0.618,
-        "78.6%": swing_high - diff*0.786 if high_idx>low_idx else swing_low + diff*0.786,
-        "100%": swing_low if high_idx>low_idx else swing_high,
+        "23.6%": swing_high - diff*0.236,
+        "38.2%": swing_high - diff*0.382,
+        "50%": swing_high - diff*0.5,
+        "61.8%": swing_high - diff*0.618,
+        "78.6%": swing_high - diff*0.786,
     }
-    return {"high":swing_high,"low":swing_low,"levels":levels,"uptrend": low_idx < high_idx, "high_idx": high_idx, "low_idx": low_idx}
+    return {"high":swing_high,"low":swing_low,"levels":levels}
 
-def draw_chart(candles,zones,fib,price,path="/tmp/gold.png"):
-    plt.figure(figsize=(12,7),facecolor='#0e0e12')
+# === جديد: كشف اصطياد السيولة ===
+def detect_liquidity_sweep(candles):
+    if len(candles)<60: return None
+    # حدد اقوى دعم ومقاومة بآخر 50 شمعة
+    recent=candles[-50:]
+    lows=[float(c[3]) for c in recent]
+    highs=[float(c[2]) for c in recent]
+    closes=[float(c[4]) for c in recent]
+
+    support=min(lows)
+    resistance=max(highs)
+
+    # افحص آخر 5 شموع هل صار سويب
+    last5=candles[-5:]
+    sweep=None
+
+    # حالة 1: سويب تحت الدعم (شراء)
+    for c in last5:
+        low=float(c[3]); close=float(c[4]); open_=float(c[1])
+        # ذيل طويل تحت الدعم + اغلاق داخل المنطقة
+        if low < support - 1.5 and close > support:
+            # فرق بين الاختراق الوهمي والحقيقي: ذيل طويل + اغلاق داخل
+            wick_size = support - low
+            body = abs(close-open_)
+            if wick_size > 1.5 and body < wick_size*2: # ذيل اكبر من الجسم
+                sweep={
+                    "type":"BUY_SWEEP",
+                    "level":support,
+                    "sweep_low":low,
+                    "msg":f"✅ اصطياد سيولة شرائي: السعر نزل تحت الدعم {support:.1f} ل {low:.1f} (اخذ ستوبات) ورجع اغلق فوق - دخول مؤسسات",
+                    "entry":support+1,
+                    "is_valid": True
+                }
+                break
+
+    # حالة 2: سويب فوق المقاومة (بيع)
+    if not sweep:
+        for c in last5:
+            high=float(c[2]); close=float(c[4]); open_=float(c[1])
+            if high > resistance + 1.5 and close < resistance:
+                wick_size = high - resistance
+                body = abs(close-open_)
+                if wick_size > 1.5 and body < wick_size*2:
+                    sweep={
+                        "type":"SELL_SWEEP",
+                        "level":resistance,
+                        "sweep_high":high,
+                        "msg":f"✅ اصطياد سيولة بيعي: السعر طلع فوق المقاومة {resistance:.1f} ل {high:.1f} (اخذ ستوبات) ورجع اغلق تحت - دخول مؤسسات",
+                        "entry":resistance-1,
+                        "is_valid": True
+                    }
+                    break
+
+    # حالة 3: كسر حقيقي - لا نتداول
+    if not sweep:
+        # اذا اغلاق شمعة كبيرة برا المستوى = كسر حقيقي
+        last_close=closes[-1]
+        last_open=float(recent[-1][1])
+        body_size=abs(last_close-last_open)
+        if last_close < support - 3 and body_size > 4:
+            sweep={"type":"REAL_BREAKDOWN","msg":f"❌ كسر حقيقي تحت {support:.1f} بشمعة كبيرة {body_size:.1f}$ - لا تتداول عكس الكسر","is_valid": False}
+        elif last_close > resistance + 3 and body_size > 4:
+            sweep={"type":"REAL_BREAKOUT","msg":f"❌ اختراق حقيقي فوق {resistance:.1f} بشمعة كبيرة - لا تتداول عكس الاختراق","is_valid": False}
+
+    return sweep
+
+def draw_chart(candles,zones,fib,sweep,price,path="/tmp/gold.png"):
+    plt.figure(figsize=(13,7),facecolor='#0e0e12')
     ax=plt.gca(); ax.set_facecolor('#0e0e12')
     data=candles[-80:]
     for idx,c in enumerate(data):
@@ -109,39 +158,41 @@ def draw_chart(candles,zones,fib,price,path="/tmp/gold.png"):
         col='#00ff88' if cl>=o else '#ff3355'
         ax.plot([idx,idx],[l,h],color=col,linewidth=1)
         ax.plot([idx,idx],[o,cl],color=col,linewidth=4,solid_capstyle='round')
-    # رسم مناطق OB القديمة
     for z in zones:
         x0=z['i']-len(candles)+len(data)
         if x0<0: continue
         col='#00ff88' if z['type']=="DEMAND" else '#ff3355'
-        rect=patches.Rectangle((x0,z['from']),80-x0,z['to']-z['from'],facecolor=col,alpha=0.25,linewidth=0)
+        rect=patches.Rectangle((x0,z['from']),80-x0,z['to']-z['from'],facecolor=col,alpha=0.2,linewidth=0)
         ax.add_patch(rect)
-    # رسم فيبوناتشي الجديد - مثل الفيديو
     if fib:
-        colors={"23.6%":"#888888","38.2%":"#ffaa00","50%":"#ffffff","61.8%":"#00ff88","78.6%":"#0088ff"}
+        colors={"38.2%":"#ffaa00","50%":"#ffffff","61.8%":"#00ff88"}
         for k,v in fib['levels'].items():
             if k in colors:
-                ax.axhline(v, color=colors[k], linestyle='--', alpha=0.7, linewidth=1 if k!="38.2%" else 2)
-                ax.text(0, v, f" {k} {v:.1f}", color=colors[k], fontsize=7, va='bottom', bbox=dict(facecolor='#0e0e12', alpha=0.7, edgecolor='none'))
-        # تظليل 0.382 الاهم
-        if "38.2%" in fib['levels']:
-            ax.axhspan(fib['levels']["38.2%"]-2, fib['levels']["38.2%"]+2, color='#ffaa00', alpha=0.1)
-
+                ax.axhline(v, color=colors[k], linestyle='--', alpha=0.6, linewidth=2 if k=="38.2%" else 1)
+                ax.text(0,v,f" {k}", color=colors[k], fontsize=7, va='bottom')
+    # رسم السيولة
+    if sweep and "level" in sweep:
+        ax.axhline(sweep["level"], color='#ff00ff', linestyle='-', alpha=0.8, linewidth=1.5)
+        ax.text(40,sweep["level"], f" LIQUIDITY {sweep['level']:.1f}", color='#ff00ff', fontsize=8, fontweight='bold', bbox=dict(facecolor='#ff00ff', alpha=0.2))
+        if "sweep_low" in sweep:
+            ax.plot([75,75],[sweep["level"],sweep["sweep_low"]], color='#ff00ff', linewidth=3, marker='o')
+        if "sweep_high" in sweep:
+            ax.plot([75,75],[sweep["level"],sweep["sweep_high"]], color='#ff00ff', linewidth=3, marker='o')
     if price:
-        ax.axhline(price,color='white',linestyle='-',alpha=0.9, linewidth=1.5)
+        ax.axhline(price,color='white',linestyle='-',alpha=0.9)
         ax.text(79,price,f" {price:.2f} ",color='black',fontsize=8,ha='right',bbox=dict(facecolor='white'))
     ax.set_xlim(-2,82)
     try:
         lows=[float(c[3]) for c in data]; highs=[float(c[2]) for c in data]
-        ax.set_ylim(min(lows)*0.996,max(highs)*1.004)
+        ax.set_ylim(min(lows)*0.995,max(highs)*1.005)
     except: pass
     ax.tick_params(colors='gray')
-    plt.title(f"XAUUSD OB + Fibonacci 0.382 | {price}", color='white', fontsize=10)
+    plt.title(f"OB + Fibo 38.2% + Liquidity Sweep | {price}", color='white', fontsize=9)
     plt.tight_layout(); plt.savefig(path,dpi=150,facecolor='#0e0e12'); plt.close()
     return path
 
 async def tawsiya(update,context):
-    await update.message.reply_text("🔍 عم حلل: OB + فيبوناتشي 0.382 + اخبار...")
+    await update.message.reply_text("🔍 عم حلل: OB + فيبو + سيولة...")
     price=get_price()
     c1h=get_candles("1h",200)
     if len(c1h)<50:
@@ -149,10 +200,10 @@ async def tawsiya(update,context):
         return
     mkt=get_market_data()
     zones=find_zones(c1h)
-    fib=calc_fibonacci(c1h) # جديد
+    fib=calc_fibonacci(c1h)
+    sweep=detect_liquidity_sweep(c1h) # جديد
     c4h=get_candles("4h",200)
-    zones4=find_zones(c4h)
-    all_zones=zones+zones4
+    all_zones=zones+find_zones(c4h)
 
     highs=[float(c[2]) for c in c1h[-50:]]; lows=[float(c[3]) for c in c1h[-50:]]
     high_50=max(highs); low_50=min(lows)
@@ -164,25 +215,35 @@ async def tawsiya(update,context):
     nearest_sup=sorted(supplies, key=lambda x: abs(x['from']-price))[0] if supplies else None
     nearest_dem=sorted(demands, key=lambda x: abs(price-x['to']))[0] if demands else None
 
-    # تأكيد فيبوناتشي 0.382 مع OB
-    fib_confirm=""
+    # منطق الدخول مع السيولة
     fib_382=fib['levels']["38.2%"] if fib else 0
-    fib_50=fib['levels']["50%"] if fib else 0
-    fib_618=fib['levels']["61.8%"] if fib else 0
+    fib_confirm=""
+    triple_confirm=False
 
-    ob_aligned_fib=False
     if nearest_sup and fib and abs(nearest_sup['from']-fib_382)<8:
-        fib_confirm=f"✅ تأكيد قوي: عرض {nearest_sup['from']:.1f} متوافق مع فيبو 38.2% {fib_382:.1f} - اكثر مستوى ينعكس منو السعر (مثل الفيديو)"
-        ob_aligned_fib=True
-    elif nearest_dem and fib and abs(nearest_dem['to']-fib_382)<8:
-        fib_confirm=f"✅ تأكيد قوي: طلب {nearest_dem['to']:.1f} متوافق مع فيبو 38.2% {fib_382:.1f} - نقطة شراء ممتازة"
-        ob_aligned_fib=True
-    elif fib and abs(price-fib_382)<5:
-        fib_confirm=f"⚠️ السعر حاليا عند 38.2% {fib_382:.1f} - المستوى الذهبي للانعكاس حسب الفيديو - انتظر اشارة تأكيد"
-    else:
-        fib_confirm=f"فيبو 38.2% عند {fib_382:.1f} | 50% عند {fib_50:.1f} | 61.8% عند {fib_618:.1f} - انتظر السعر يرجع لاحد المستويات"
+        fib_confirm=f"✅ OB+فيبو 38.2% متوافق {fib_382:.1f}"
 
-    if not trend_up and nearest_sup:
+    sweep_confirm=""
+    if sweep and sweep.get("is_valid"):
+        sweep_confirm=sweep["msg"]
+        if sweep["type"]=="BUY_SWEEP" and nearest_dem:
+            if abs(sweep["level"]-nearest_dem['to'])<5 and abs(fib_382-nearest_dem['to'])<10:
+                triple_confirm=True
+        if sweep["type"]=="SELL_SWEEP" and nearest_sup:
+            if abs(sweep["level"]-nearest_sup['from'])<5 and abs(fib_382-nearest_sup['from'])<10:
+                triple_confirm=True
+    elif sweep and not sweep.get("is_valid"):
+        sweep_confirm=sweep["msg"]
+
+    if sweep and sweep["type"]=="BUY_SWEEP" and sweep["is_valid"]:
+        entry=sweep["entry"]; sl=sweep["sweep_low"]-1; tp1=entry+8; tp2=high_50
+        type_trade="🟢 شراء BUY - سيولة"
+        reason=f"اصطياد سيولة تحت {sweep['level']:.1f} + طلب {nearest_dem['from']:.1f} اذا موجود"
+    elif sweep and sweep["type"]=="SELL_SWEEP" and sweep["is_valid"]:
+        entry=sweep["entry"]; sl=sweep["sweep_high"]+1; tp1=entry-8; tp2=low_50
+        type_trade="🔴 بيع SELL - سيولة"
+        reason=f"اصطياد سيولة فوق {sweep['level']:.1f} + عرض {nearest_sup['from']:.1f} اذا موجود"
+    elif not trend_up and nearest_sup:
         entry=nearest_sup['from']+0.5; sl=nearest_sup['to']+3.8; tp1=entry-8; tp2=low_50
         type_trade="🔴 بيع SELL"
         reason=f"ترند هابط + عرض {nearest_sup['from']:.1f}"
@@ -191,16 +252,15 @@ async def tawsiya(update,context):
         type_trade="🟢 شراء BUY"
         reason=f"ترند صاعد + طلب {nearest_dem['from']:.1f}"
     else:
-        entry=price; sl=price-5; tp1=price-8 if not trend_up else price+8; tp2=low_50 if not trend_up else high_50
-        type_trade="🔴 بيع SELL" if not trend_up else "🟢 شراء BUY"
-        reason="انتظار"
+        entry=price; sl=price-5; tp1=price-8; tp2=low_50
+        type_trade="⏸️ انتظار"
+        reason="ما في منطقة واضحة"
 
-    chart=draw_chart(c1h,zones,fib,price)
-    news_txt="\n".join([f"• {n}" for n in mkt['news']])
+    chart=draw_chart(c1h,zones,fib,sweep,price)
 
-    conf_emoji="🔥🔥 تأكيد مزدوج OB+فيبو" if ob_aligned_fib else "⏳ بانتظار توافق فيبو"
+    triple_txt="🔥🔥🔥 تأكيد ثلاثي OB+فيبو38.2%+سيولة = اقوى دخول" if triple_confirm else "تأكيد ثنائي" if fib_confirm and sweep_confirm else ""
 
-    txt=f"""{type_trade} | {'صاعد 🟢' if trend_up else 'هابط 🔴'} {conf_emoji}
+    txt=f"""{type_trade} | {triple_txt}
 ━━━━━━━━━━━━━━━
 💰 السعر: {price:.2f}
 
@@ -211,62 +271,59 @@ async def tawsiya(update,context):
 هدف2: {tp2:.2f}
 نسبة: 1:{abs(tp1-entry)/max(1,abs(entry-sl)):.1f}
 
-📍 الفني القديم:
+📍 الفني القديم (ما حذفتو):
 {reason}
-دعم: {nearest_dem['from']:.1f} طلب | {len(demands)} مناطق
-مقاومة: {nearest_sup['from']:.1f} عرض | {len(supplies)} مناطق
+دعم: {nearest_dem['from']:.1f} | مقاومة: {nearest_sup['from']:.1f}
+{len(demands)} طلب | {len(supplies)} عرض
 قمة 50: {high_50:.1f} | قاع 50: {low_50:.1f}
 
-📐 فيبوناتشي الجديد (من الفيديو):
-Swing Low: {fib['low']:.1f} | Swing High: {fib['high']:.1f}
-• 38.2% الذهبي: {fib_382:.1f} ← اكثر مستوى ينعكس
-• 50%: {fib_50:.1f}
-• 61.8%: {fib_618:.1f}
+📐 فيبو 38.2% (من الفيديو الاول):
+الذهبي: {fib_382:.1f}
 {fib_confirm}
 
-🌍 اساسي:
-BTC: {mkt.get('btc_change',0):+.1f}% | الذهب اليوم: {mkt.get('gold_change',0):+.2f}%
-📰 اخبار:
-{news_txt}
+💧 سيولة (من الفيديو الثاني - الجديد):
+{sweep_confirm if sweep_confirm else 'ما في سويب حاليا - انتظر كسر وهمي بذيل طويل + اغلاق داخل'}
+{triple_txt}
 
-💡 طريقة الدخول (مثل الفيديو):
-1. حدد القاع والقمة ✅ عملها البوت
-2. انتظر السعر يرجع لـ 38.2% ← {fib_382:.1f}
-3. ادمج مع OB + اشارة تأكيد ثانية = نقطة دخول ممتازة
+💡 كيف تدخل مثل الفيديو:
+1. شوف مستوى دعم/مقاومة واضح ✅
+2. انتظر السعر ياخد السيولة (ذيل طويل برا المستوى)
+3. ادخل لما يرجع يغلق داخل المستوى
+4. اذا المنطقة = فيبو 38.2% + OB = دخول مؤسسات قوي
 
-✅ كلشي القديم موجود + فيبو تأكيد
+🌍 BTC: {mkt.get('btc_change',0):+.1f}%
 """
     await context.bot.send_photo(chat_id=update.effective_chat.id, photo=open(chart,'rb'), caption=txt)
 
 async def alert_on(update,context):
     ALERT_CHATS.add(update.effective_chat.id)
-    await update.message.reply_text("✅ التنبيه شغال مع فيبو 38.2% 🔔")
+    await update.message.reply_text("✅ تنبيه OB+فيبو+سيولة شغال 🔔")
 
 async def alert_off(update,context):
     ALERT_CHATS.discard(update.effective_chat.id)
     await update.message.reply_text("❌ وقفنا")
 
 async def start(update,context):
-    await update.message.reply_text("V20 OB + Fibonacci 0.382\n/tawsiya توصية مؤكدة بفيبو\n/alert_on")
+    await update.message.reply_text("V21 OB+Fibo+Liquidity\n/tawsiya توصية ثلاثية التأكيد")
 
 async def check_alerts(context):
     if not ALERT_CHATS: return
     price=get_price()
     c1h=get_candles("1h",200)
-    fib=calc_fibonacci(c1h)
     zones=find_zones(c1h)
+    sweep=detect_liquidity_sweep(c1h)
+    fib=calc_fibonacci(c1h)
     for z in zones:
         if z['from']-3 <= price <= z['to']+3:
-            # تأكيد اضافي مع فيبو
             extra=""
-            if fib and abs(z['from']-fib['levels']["38.2%"])<8:
-                extra=" + توافق فيبو 38.2% 🔥"
+            if fib and abs(z['from']-fib['levels']["38.2%"])<8: extra+=" + فيبو38.2% 🔥"
+            if sweep and sweep.get("is_valid") and abs(sweep["level"]-z['from'])<5: extra+=" + سيولة 🔥"
             key=f"{z['type']}_{z['from']:.0f}"
             if LAST_ALERT.get(key) and abs(price-LAST_ALERT[key])<4: continue
             LAST_ALERT[key]=price
             for chat_id in list(ALERT_CHATS):
                 try:
-                    await context.bot.send_message(chat_id,f"🚨 {z['type']} {z['from']:.1f}{extra}\n/tawsiya للشارت مع فيبو")
+                    await context.bot.send_message(chat_id,f"🚨 {z['type']} {z['from']:.1f}{extra}\n/tawsiya")
                 except: pass
 
 if __name__=="__main__":
