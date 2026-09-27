@@ -1,6 +1,5 @@
 import os
 import time
-import math
 import threading
 import requests
 import pandas as pd
@@ -31,7 +30,7 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"Gold Bot - Direct API Active")
+        self.wfile.write(b"Gold Bot Active")
 
 def run_http_server():
     port = int(os.environ.get("PORT", 8080))
@@ -45,8 +44,6 @@ def is_market_open():
     return True
 
 def get_realtime_gold_price():
-    """ جلب سعر الذهب المباشر من أكثر من مصدر API مجاني موثوق """
-    # المصدر الأول: Metals-API / ExchangeRate بديل
     try:
         res = requests.get("https://api.exchangerate-api.com/v4/latest/XAU", timeout=5).json()
         if "rates" in res and "USD" in res["rates"]:
@@ -55,27 +52,12 @@ def get_realtime_gold_price():
                 return round(price, 2)
     except Exception:
         pass
-
-    # المصدر الثاني: GoldAPI بديل سريع
-    try:
-        res = requests.get("https://data-asg.goldprice.org/dbXRates/USD", timeout=5).json()
-        if "items" in res and len(res["items"]) > 0:
-            price = float(res["items"][0]["xauPrice"])
-            if 1500 < price < 4000:
-                return round(price, 2)
-    except Exception:
-        pass
-
-    # سعر افتراضي مباشر في حال بطء السيرفر لضمان عدم توقف البوت أبداً
     return 2658.50
 
 def generate_market_dataframe(current_price):
-    """ إنشاء جدول بيانات وهمي دقيق بناءً على السعر الحقيقي لحساب المؤشرات والفيبوناتشي دون أخطاء """
     dates = pd.date_range(end=datetime.now(), periods=30, freq='15min')
-    
-    # محاكاة حركة شموع واقعية متصلة بالسعر الحالي
     prices = [current_price + (i * 0.2) - 3 for i in range(30)]
-    prices[-1] = current_price  آخر سعر هو السعر الحالي بالضبط
+    prices[-1] = current_price  # السعر الحالي بدقة
     
     df = pd.DataFrame({
         'Open': [p - 0.5 for p in prices],
@@ -84,7 +66,6 @@ def generate_market_dataframe(current_price):
         'Close': prices
     }, index=dates)
     
-    # المؤشرات والاستراتيجية
     df['EMA_50'] = df['Close'].ewm(span=10, adjust=False).mean()
     df['Swing_High'] = df['High'].rolling(window=15).max().bfill()
     df['Swing_Low'] = df['Low'].rolling(window=15).min().bfill()
@@ -102,7 +83,7 @@ def generate_market_dataframe(current_price):
 def get_live_market_status():
     try:
         market_open = is_market_open()
-        market_status_text = "🟢 **السوق مفتوح**" if market_open else "🔴 **السوق مغلق**"
+        market_status_text = "🟢 السوق مفتوح" if market_open else "🔴 السوق مغلق"
 
         price = get_realtime_gold_price()
         df = generate_market_dataframe(price)
@@ -114,7 +95,7 @@ def get_live_market_status():
         swing_high = round(float(last_row['Swing_High']), 2)
 
         trend = "ترند صاعد 📈" if price >= ema_50 else "ترند هابط 📉"
-        zone_status = "منطقة خصم الشراء (Discount Region - تحت Fib 50%) 🛒🟢" if price <= fib_500 else "منطقة البيع المرتفعة (Premium Region - فوق Fib 50%) 📈🔴"
+        zone_status = "منطقة خصم الشراء (Discount Region) 🛒🟢" if price <= fib_500 else "منطقة البيع المرتفعة (Premium Region) 📈🔴"
 
         return f"""📊 **تقرير الذهب الشامل (XAU/USD):**
 
@@ -145,14 +126,12 @@ def analyze_full_pullback_strategy():
         swing_low = float(c0['Swing_Low'])
         swing_high = float(c0['Swing_High'])
 
-        # شروط الشراء
         buy_cond = (price > ema_50) and (c1['Is_Red'] and c2['Is_Red'] and c3['Is_Red']) and (price < fib_500) and c0['Is_Green']
         if buy_cond:
             sl = round(swing_low - 1.5, 2)
             tp = round(swing_high, 2)
             return f"""🚀 **توصية شراء (BUY XAU/USD)** 🚀\n\n📍 **سعر الدخول:** `{price}$` \n🛑 **وقف الخسارة:** `{sl}$` \n🎯 **الهدف:** `{tp}$`"""
 
-        # شروط البيع
         sell_cond = (price < ema_50) and (c1['Is_Green'] and c2['Is_Green'] and c3['Is_Green']) and (price > fib_500) and c0['Is_Red']
         if sell_cond:
             sl = round(swing_high + 1.5, 2)
@@ -174,12 +153,11 @@ def telegram_listener():
                     offset = update["update_id"] + 1
                     if "message" in update and "text" in update["message"]:
                         msg_text = update["message"]["text"].strip()
-                        
                         if any(word in msg_text for word in ["سعر", "تحليل", "وضع", "توصية", "فيبوناتشي"]):
                             reply = get_live_market_status()
                             send_telegram_message(reply)
                         elif msg_text in ["/start", "مرحبا", "هلا", "شغال"]:
-                            send_telegram_message("أهلاً بك! 🤖 تم ربط البوت بـ API مباشر للذهب. اكتب **سعر** للتحليل.")
+                            send_telegram_message("أهلاً بك! البوت جاهز ويعمل بكفاءة.")
         except Exception:
             pass
         time.sleep(1)
@@ -188,7 +166,7 @@ if __name__ == "__main__":
     threading.Thread(target=run_http_server, daemon=True).start()
     threading.Thread(target=telegram_listener, daemon=True).start()
 
-    send_telegram_message("✅ **تم تحديث النظام والربط المباشر بسعر الذهب الفوري بنجاح!**")
+    send_telegram_message("✅ تم تحديث وتشغيل البوت بنجاح!")
 
     last_trade_time = 0
 
