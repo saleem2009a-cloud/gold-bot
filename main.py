@@ -3,6 +3,7 @@ import time
 import threading
 import requests
 import pandas as pd
+import yfinance as yf
 from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
@@ -45,104 +46,109 @@ def is_market_open():
         return False
     return True
 
-def get_realtime_gold_price():
+def fetch_real_market_data():
+    """ جلب السعر الحقيقي والبيانات الحية مباشرة من بورصة الذهب العالمية عبر yfinance """
     try:
-        res = requests.get("https://api.exchangerate-api.com/v4/latest/XAU", timeout=5).json()
-        if "rates" in res and "USD" in res["rates"]:
-            price = 1 / res["rates"]["USD"]
-            if 1500 < price < 5000:
-                # حساب الفارق لضبط السعر تماماً على 4269.70 بناءً على السعر الحقيقي الحالي
-                base_external = price
-                target_price = 4269.70
-                offset = target_price - base_external
-                return round(base_external + offset, 2)
+        ticker = yf.Ticker("XAUUSD=X")
+        df = ticker.history(period="5d", interval="15m")
+        if not df.empty:
+            return df
     except Exception:
         pass
-    return 4269.70
-
-def generate_market_dataframe(current_price):
-    dates = pd.date_range(end=datetime.now(), periods=30, freq='15min')
-    prices = [current_price + (i * 0.1) - 1.5 for i in range(30)]
-    prices[-1] = current_price  # السعر الحالي دقيق ومطابق تماماً
     
-    df = pd.DataFrame({
-        'Open': [p - 0.3 for p in prices],
-        'High': [p + 0.8 for p in prices],
-        'Low': [p - 0.8 for p in prices],
-        'Close': prices
-    }, index=dates)
-    
-    df['EMA_50'] = df['Close'].ewm(span=10, adjust=False).mean()
-    df['Swing_High'] = df['High'].rolling(window=15).max().bfill()
-    df['Swing_Low'] = df['Low'].rolling(window=15).min().bfill()
-
-    high_val = df['Swing_High']
-    low_val = df['Swing_Low']
-    diff = high_val - low_val
-    df['Fib_500'] = high_val - (diff * 0.500)
-
-    df['Is_Red'] = df['Close'] < df['Open']
-    df['Is_Green'] = df['Close'] > df['Open']
-    
-    return df
+    # محاولة بديلة بفريم اليوم في حال الضغط
+    try:
+        ticker = yf.Ticker("GC=F")
+        df = ticker.history(period="5d", interval="15m")
+        if not df.empty:
+            return df
+    except Exception:
+        pass
+        
+    return None
 
 def get_live_market_status():
     try:
         market_open = is_market_open()
         market_status_text = "🟢 السوق مفتوح" if market_open else "🔴 السوق مغلق"
 
-        price = get_realtime_gold_price()
-        df = generate_market_dataframe(price)
-        last_row = df.iloc[-1]
+        df = fetch_real_market_data()
+        if df is None or df.empty:
+            return "⚠️ تعذر جلب السعر اللحظي من السوق حالياً، أعد المحاولة بعد قليل."
 
-        ema_50 = round(float(last_row['EMA_50']), 2)
-        fib_500 = round(float(last_row['Fib_500']), 2)
-        swing_low = round(float(last_row['Swing_Low']), 2)
-        swing_high = round(float(last_row['Swing_High']), 2)
+        # حساب المؤشرات الحقيقية من بيانات السوق مباشرة
+        df['EMA_50'] = df['Close'].ewm(span=50, adjust=False).mean()
+        df['Swing_High'] = df['High'].rolling(window=20).max()
+        df['Swing_Low'] = df['Low'].rolling(window=20).min()
+
+        high_val = df['Swing_High']
+        low_val = df['Swing_Low']
+        diff = high_val - low_val
+        df['Fib_500'] = high_val - (diff * 0.500)
+
+        last_row = df.iloc[-1]
+        price = round(float(last_row['Close']), 2)
+        ema_50 = round(float(last_row['EMA_50']), 2) if not pd.isna(last_row['EMA_50']) else price
+        fib_500 = round(float(last_row['Fib_500']), 2) if not pd.isna(last_row['Fib_500']) else price
+        swing_low = round(float(last_row['Swing_Low']), 2) if not pd.isna(last_row['Swing_Low']) else price - 10
+        swing_high = round(float(last_row['Swing_High']), 2) if not pd.isna(last_row['Swing_High']) else price + 10
 
         trend = "ترند صاعد 📈" if price >= ema_50 else "ترند هابط 📉"
         zone_status = "منطقة خصم الشراء (Discount Region) 🛒🟢" if price <= fib_500 else "منطقة البيع المرتفعة (Premium Region) 📈🔴"
 
-        return f"""📊 **تقرير الذهب الشامل (XAU/USD):**
+        return f"""📊 **تقرير الذهب الحقيقي المباشر (XAU/USD):**
 
 🔒 **حالة السوق:** {market_status_text}
-💰 **السعر الحالي الدقيق:** `{price}$`
-📉 **مؤشر EMA:** `{ema_50}$` ({trend})
+💰 **السعر الحقيقي من السوق:** `{price}$`
+📉 **مؤشر EMA 50:** `{ema_50}$` ({trend})
 🎯 **مستوى 50% فيبوناتشي:** `{fib_500}$`
 🏷️ **التقييم:** {zone_status}
 
 📍 **القاع (الدعم):** `{swing_low}$` | **القمة (المقاومة):** `{swing_high}$`"""
     except Exception as e:
-        return f"حدث خطأ في النظام: {e}"
+        return f"حدث خطأ في جلب بيانات السوق: {e}"
 
 def analyze_full_pullback_strategy():
     if not is_market_open():
         return None
     try:
-        price = get_realtime_gold_price()
-        df = generate_market_dataframe(price)
-        
+        df = fetch_real_market_data()
+        if df is None or df.empty or len(df) < 10:
+            return None
+
+        df['EMA_50'] = df['Close'].ewm(span=50, adjust=False).mean()
+        df['Swing_High'] = df['High'].rolling(window=20).max()
+        df['Swing_Low'] = df['Low'].rolling(window=20).min()
+        diff = df['Swing_High'] - df['Swing_Low']
+        df['Fib_500'] = df['Swing_High'] - (diff * 0.500)
+
+        df['Is_Red'] = df['Close'] < df['Open']
+        df['Is_Green'] = df['Close'] > df['Open']
+
         c0 = df.iloc[-1]
         c1 = df.iloc[-2]
         c2 = df.iloc[-3]
         c3 = df.iloc[-4]
 
+        price = float(c0['Close'])
         ema_50 = float(c0['EMA_50'])
         fib_500 = float(c0['Fib_500'])
         swing_low = float(c0['Swing_Low'])
         swing_high = float(c0['Swing_High'])
 
+        # شروط الشراء
         buy_cond = (price > ema_50) and (c1['Is_Red'] and c2['Is_Red'] and c3['Is_Red']) and (price < fib_500) and c0['Is_Green']
         if buy_cond:
             sl = round(swing_low - 1.5, 2)
             tp = round(swing_high, 2)
-            return f"""🚀 **توصية شراء (BUY XAU/USD)** 🚀\n\n📍 **سعر الدخول:** `{price}$` \n🛑 **وقف الخسارة:** `{sl}$` \n🎯 **الهدف:** `{tp}$`"""
+            return f"""🚀 **توصية شراء حقيقية (BUY XAU/USD)** 🚀\n\n📍 **سعر الدخول:** `{round(price, 2)}$` \n🛑 **وقف الخسارة:** `{sl}$` \n🎯 **الهدف:** `{tp}$`"""
 
+        # شروط البيع
         sell_cond = (price < ema_50) and (c1['Is_Green'] and c2['Is_Green'] and c3['Is_Green']) and (price > fib_500) and c0['Is_Red']
         if sell_cond:
             sl = round(swing_high + 1.5, 2)
             tp = round(swing_low, 2)
-            return f"""🔻 **توصية بيع (SELL XAU/USD)** 🔻\n\n📍 **سعر الدخول:** `{price}$` \n🛑 **وقف الخسارة:** `{sl}$` \n🎯 **الهدف:** `{tp}$`"""
+            return f"""🔻 **توصية بيع حقيقية (SELL XAU/USD)** 🔻\n\n📍 **سعر الدخول:** `{round(price, 2)}$` \n🛑 **وقف الخسارة:** `{sl}$` \n🔥 **الهدف:** `{tp}$`"""
 
     except Exception:
         pass
@@ -163,7 +169,7 @@ def telegram_listener():
                             reply = get_live_market_status()
                             send_telegram_message(reply)
                         elif msg_text in ["/start", "مرحبا", "هلا", "شغال"]:
-                            send_telegram_message("أهلاً بك! تم ضبط السعر بدقة تامة ليتطابق مع منصتك.")
+                            send_telegram_message("أهلاً بك! البوت متصل بالسوق الحي لجلب الأسعار الحقيقية.")
         except Exception:
             pass
         time.sleep(1)
@@ -172,7 +178,7 @@ if __name__ == "__main__":
     threading.Thread(target=run_http_server, daemon=True).start()
     threading.Thread(target=telegram_listener, daemon=True).start()
 
-    send_telegram_message("✅ **تم تحديث البوت وضبط السعر بدقة تامة على 4269.70$!**")
+    send_telegram_message("✅ **تم ربط البوت بجلب السعر الحقيقي المباشر من السوق بنجاح!**")
 
     last_trade_time = 0
 
