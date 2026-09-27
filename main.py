@@ -12,6 +12,12 @@ TELEGRAM_TOKEN = "8347268155:AAH3oQ4MaH1rWxvoEgoEOLfgPI_DfRAsNBY"
 CHAT_ID = "1347502348"
 SYMBOL = "GC=F"
 
+# إلغاء أي Webhook قديم لتفادي تعليق الرسائل الواردة
+try:
+    requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/deleteWebhook")
+except Exception:
+    pass
+
 def send_telegram_message(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {
@@ -22,7 +28,7 @@ def send_telegram_message(message):
     try:
         requests.post(url, json=payload, timeout=10)
     except Exception as e:
-        print(f"خطأ في إرسال الرسالة: {e}")
+        print(f"خطأ إرسال: {e}")
 
 class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -36,24 +42,23 @@ def run_http_server():
     server.serve_forever()
 
 def get_economic_news_summary():
-    return """📰 **تقرير الأخبار الاقتصادية:**
+    return """📰 **تقرير الأخبار الاقتصادية والتقويم:**
 
-• **أسعار الفائدة والتضخم:** متابعة تصريحات الفيدرالي وبيانات التضخم الأمريكية (CPI).
-• **حالة السوق الإخبارية:** مستقرة حالياً 🟢 بدون أخبار عالية الخطورة.
-• **توصية:** ينصح دائماً بالحذر وقت صدور تقارير الوظائف الفيدرالية NFP."""
+• **أسعار الفائدة والتضخم:** متابعة تصريحات الفيدرالي الأمريكي وبيانات التضخم CPI.
+• **حالة المخاطر:** مستقرة حالياً 🟢.
+• **توصية:** انتبه لأوقات بيانات NFP والوظائف الفيدرالية."""
 
 def get_moon_phase(dt):
     diff = dt - datetime(2000, 1, 6, 18, 14, tzinfo=timezone.utc)
     days = diff.total_seconds() / 86400.0
-    lunation = (days % 29.53058770576) / 29.53058770576
-    angle = lunation * 360.0
+    angle = ((days % 29.53058770576) / 29.53058770576) * 360.0
 
     if angle < 15 or angle > 345:
-        return "محاق (New Moon) 🌑 - انعكاس قوي متوقع", "High"
+        return "محاق (New Moon) 🌑 - منطقة انعكاس زمني فلكي"
     elif 165 < angle < 195:
-        return "بدر (Full Moon) 🌕 - ذروة التذبذب والسيولة", "High"
+        return "بدر (Full Moon) 🌕 - ذروة التذبذب والسيولة"
     else:
-        return "مسار فلكي اعتيادي 🌙", "Low"
+        return "مسار فلكي اعتيادي 🌙"
 
 def analyze_time_cycles():
     now = datetime.now(timezone.utc)
@@ -97,7 +102,7 @@ def get_live_market_status():
     try:
         data = yf.download(tickers=SYMBOL, period="5d", interval="15m", progress=False)
         if data.empty:
-            return "جاري تحديث بيانات السوق، حاول بعد لحظات..."
+            return "جاري تحديث بيانات الذهب، حاول بعد قليل..."
 
         if isinstance(data.columns, pd.MultiIndex):
             data.columns = data.columns.get_level_values(0)
@@ -111,7 +116,7 @@ def get_live_market_status():
         trend = "صاعد 📈" if price > sma50 else "هابط 📉"
 
         now = datetime.now(timezone.utc)
-        astro_phase, astro_impact = get_moon_phase(now)
+        astro_phase = get_moon_phase(now)
         time_session, is_time_turn = analyze_time_cycles()
 
         return f"""📊 **تقرير الذهب اللحظي (XAU/USD):**
@@ -121,11 +126,9 @@ def get_live_market_status():
 📉 **مؤشر RSI:** {rsi}
 ⏳ **الجلسة الحالية:** {time_session}
 ⚠️ **انعكاس زمني (Gann):** {"نعم ⚠️" if is_time_turn else "لا 🟢"}
-🌌 **الدورة القمرية:** {astro_phase}
-
-💬 *البوت يعمل خلف الكواليس لإرسال التوصيات الشاملة والصفقات السريعة أوتوماتيكياً.*"""
+🌌 **الدورة القمرية:** {astro_phase}"""
     except Exception as e:
-        return f"خطأ في البيانات: {e}"
+        return f"حدث خطأ في البيانات: {e}"
 
 def analyze_scalping():
     try:
@@ -147,18 +150,10 @@ def analyze_scalping():
         prev_macd = float(prev_row['MACD'])
         prev_signal = float(prev_row['Signal_Line'])
 
-        scalp_buy = (macd > signal) and (prev_macd <= prev_signal) and (rsi < 40)
-        scalp_sell = (macd < signal) and (prev_macd >= prev_signal) and (rsi > 60)
-
-        if scalp_buy:
-            tp = round(price + 2.5, 2)
-            sl = round(price - 2.0, 2)
-            return f"⚡ **صفقة سريعة (SCALP BUY)** ⚡\n\n📍 **سعر الدخول:** `{price}`\n🎯 **الهدف السريع:** `{tp}`\n🛑 **إيقاف الخسارة:** `{sl}`\n📊 **RSI:** {rsi}"
-
-        elif scalp_sell:
-            tp = round(price - 2.5, 2)
-            sl = round(price + 2.0, 2)
-            return f"⚡ **صفقة سريعة (SCALP SELL)** ⚡\n\n📍 **سعر الدخول:** `{price}`\n🎯 **الهدف السريع:** `{tp}`\n🛑 **إيقاف الخسارة:** `{sl}`\n📊 **RSI:** {rsi}"
+        if (macd > signal) and (prev_macd <= prev_signal) and (rsi < 40):
+            return f"⚡ **صفقة سريعة (SCALP BUY)** ⚡\n\n📍 **الدخول:** `{price}`\n🎯 **الهدف:** `{round(price+2.5,2)}`\n🛑 **الاستوب:** `{round(price-2.0,2)}`\n📊 **RSI:** {rsi}"
+        elif (macd < signal) and (prev_macd >= prev_signal) and (rsi > 60):
+            return f"⚡ **صفقة سريعة (SCALP SELL)** ⚡\n\n📍 **الدخول:** `{price}`\n🎯 **الهدف:** `{round(price-2.5,2)}`\n🛑 **الاستوب:** `{round(price+2.0,2)}`\n📊 **RSI:** {rsi}"
     except Exception:
         pass
     return None
@@ -186,65 +181,50 @@ def analyze_gold_main():
         atr = round(float(last_row['ATR']), 2) if not pd.isna(last_row['ATR']) else 5.0
 
         now = datetime.now(timezone.utc)
-        astro_phase, astro_impact = get_moon_phase(now)
+        astro_phase = get_moon_phase(now)
         time_session, is_time_turn = analyze_time_cycles()
-
         trend = "صاعد 📈" if price > sma50 else "هابط 📉"
-
-        is_buy = (macd > signal) and (prev_macd <= prev_signal) and (rsi < 65) and (price > sma50)
-        is_sell = (macd < signal) and (prev_macd >= prev_signal) and (rsi > 35) and (price < sma50)
 
         gann_factor = math.sqrt(price)
 
-        if is_buy:
-            entry = price
-            sl = round(entry - (atr * 1.5), 2)
-            tp1 = round(entry + (atr * 1.5), 2)
-            tp2 = round(((gann_factor + 0.25) ** 2), 2)
-            return f"🚨 **توصية رئيسية: شراء (BUY XAU/USD)** 🚀\n\n📍 **سعر الدخول:** `{entry}`\n🎯 **TP1:** `{tp1}` | **TP2 (زمني/فلكي):** `{tp2}`\n🛑 **SL:** `{sl}`\n\n📊 **الاتجاه:** {trend} | RSI: {rsi}\n⏳ **الجلسة:** {time_session}\n🌌 **الفلكي:** {astro_phase}"
-
-        elif is_sell:
-            entry = price
-            sl = round(entry + (atr * 1.5), 2)
-            tp1 = round(entry - (atr * 1.5), 2)
-            tp2 = round(((gann_factor - 0.25) ** 2), 2)
-            return f"🚨 **توصية رئيسية: بيع (SELL XAU/USD)** 🔻\n\n📍 **سعر الدخول:** `{entry}`\n🎯 **TP1:** `{tp1}` | **TP2 (زمني/فلكي):** `{tp2}`\n🛑 **SL:** `{sl}`\n\n📊 **الاتجاه:** {trend} | RSI: {rsi}\n⏳ **الجلسة:** {time_session}\n🌌 **الفلكي:** {astro_phase}"
+        if (macd > signal) and (prev_macd <= prev_signal) and (rsi < 65) and (price > sma50):
+            return f"🚨 **توصية رئيسية: شراء (BUY XAU/USD)** 🚀\n\n📍 **الدخول:** `{price}`\n🎯 **TP1:** `{round(price+(atr*1.5),2)}` | **TP2:** `{round(((gann_factor+0.25)**2),2)}`\n🛑 **SL:** `{round(price-(atr*1.5),2)}`\n\n📊 **الاتجاه:** {trend} | RSI: {rsi}\n⏳ **الجلسة:** {time_session}\n🌌 **الفلكي:** {astro_phase}"
+        elif (macd < signal) and (prev_macd >= prev_signal) and (rsi > 35) and (price < sma50):
+            return f"🚨 **توصية رئيسية: بيع (SELL XAU/USD)** 🔻\n\n📍 **الدخول:** `{price}`\n🎯 **TP1:** `{round(price-(atr*1.5),2)}` | **TP2:** `{round(((gann_factor-0.25)**2),2)}`\n🛑 **SL:** `{round(price+(atr*1.5),2)}`\n\n📊 **الاتجاه:** {trend} | RSI: {rsi}\n⏳ **الجلسة:** {time_session}\n🌌 **الفلكي:** {astro_phase}"
     except Exception:
         pass
     return None
 
-def handle_user_command(text):
-    clean_text = text.strip().lower()
-    if clean_text in ["/start", "مرحبا", "هلا", "شغال"]:
-        send_telegram_message("أهلاً بك يا سليم! 🤖 أنا جاهز ومستعد للرد المباشر.\n\n• اكتب **سعر** أو **تحليل** أو `/tawsiya` لمعرفة الوضع المباشر\n• اكتب **اخبار** أو `/news` للتقويم الاقتصادي")
-    elif "خبر" in clean_text or "اخبار" in clean_text or "/news" in clean_text:
-        send_telegram_message(get_economic_news_summary())
-    elif "تحليل" in clean_text or "سعر" in clean_text or "وضع" in clean_text or "توصية" in clean_text or "/tawsiya" in clean_text:
-        send_telegram_message(get_live_market_status())
-
-def listen_to_telegram_messages():
+# الاستماع المستقل والدقيق للرسائل
+def telegram_listener():
     offset = 0
     while True:
         try:
-            url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates?offset={offset}&timeout=10"
-            res = requests.get(url, timeout=15).json()
-            if "result" in res:
-                for update in res["result"]:
+            url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates?offset={offset}&timeout=5"
+            response = requests.get(url, timeout=10).json()
+            if "result" in response:
+                for update in response["result"]:
                     offset = update["update_id"] + 1
                     if "message" in update and "text" in update["message"]:
-                        chat_id = str(update["message"]["chat_id"])
-                        if chat_id == CHAT_ID:
-                            text = update["message"]["text"]
-                            threading.Thread(target=handle_user_command, args=(text,), daemon=True).start()
+                        msg_text = update["message"]["text"].strip()
+                        
+                        if any(word in msg_text for word in ["سعر", "تحليل", "وضع", "توصية", "/tawsiya"]):
+                            reply = get_live_market_status()
+                            send_telegram_message(reply)
+                        elif any(word in msg_text for word in ["خبر", "اخبار", "/news"]):
+                            reply = get_economic_news_summary()
+                            send_telegram_message(reply)
+                        elif msg_text in ["/start", "مرحبا", "هلا", "شغال"]:
+                            send_telegram_message("أهلاً بك يا سليم! 🤖 اكتب **سعر** للتحليل اللحظي أو **اخبار** للتقويم الاقتصادي.")
         except Exception:
             pass
         time.sleep(1)
 
 if __name__ == "__main__":
     threading.Thread(target=run_http_server, daemon=True).start()
-    threading.Thread(target=listen_to_telegram_messages, daemon=True).start()
+    threading.Thread(target=telegram_listener, daemon=True).start()
 
-    send_telegram_message("✅ **تم تحديث البوت بنجاح بالنظام التفاعلي اللحظي!**\nاكتب 'سعر' أو 'اخبار' وسيرد عليك فوراً.")
+    send_telegram_message("✅ **تم الشبيك والتحديث بنجاح!**\nارسل الآن كلمة 'سعر' أو 'اخبار' واختبر الرد المباشر.")
 
     last_main_signal_time = 0
     last_scalp_signal_time = 0
@@ -266,4 +246,4 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"خطأ: {e}")
 
-        time.sleep(120)
+        time.sleep(60)
