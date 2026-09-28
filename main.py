@@ -2,7 +2,7 @@ import os, requests, time, math
 from datetime import datetime
 import pytz
 TOKEN = "".join(os.getenv("BOT_TOKEN","").split())
-print(f"V24 DIRECT BEAR + CET FIX", flush=True)
+print(f"V25 DAILY CANDLE + OLD", flush=True)
 
 import telebot, yfinance as yf, pandas as pd, ta
 import matplotlib.pyplot as plt, matplotlib.patches as mpatches
@@ -71,23 +71,22 @@ def build_scalp():
         return f"🔴 سكالب بيع دخول {entry:.1f} وقف {sl:.1f} هدف {tp:.1f}", entry, sl, tp, "SELL"
     return None, None, None, None, None
 
-# ===== وقت مصلح CET =====
 def get_time_cycle_analysis(df):
     cet = pytz.timezone('Europe/Berlin')
     now = datetime.now(cet)
     hour = now.hour
-    if 8 <= hour < 11: kz=f"🌟 لندن Killzone {now.strftime('%H:%M CET')} - سيولة عالية"
+    if 8 <= hour < 11: kz=f"🌟 لندن Killzone {now.strftime('%H:%M CET')}"
     elif 14 <= hour < 17: kz=f"🌟 نيويورك Killzone {now.strftime('%H:%M CET')} - سيولة عالية جدا"
-    elif 20 <= hour < 23: kz=f"🌙 اسيا {now.strftime('%H:%M CET')} - تجميع"
+    elif 20 <= hour < 23: kz=f"🌙 اسيا {now.strftime('%H:%M CET')}"
     else: kz=f"⏳ خارج الكيلزون {now.strftime('%H:%M CET')}"
     try:
         low_series = get_series(df,'Low')
         low_idx_pos = int(low_series.tail(200).argmin())
         bars = 200 - low_idx_pos
         gann = bars % 90
-        gann_txt = f"Gann: من القاع {bars} شمعة - {gann}/90 {'⚠️ انعكاس قريب' if gann>75 else f'باقي {90-gann} شمعة للانعكاس'}"
+        gann_txt = f"Gann: من القاع {bars} شمعة - {gann}/90 {'⚠️ انعكاس قريب' if gann>75 else f'باقي {90-gann} شمعة'}"
     except:
-        gann_txt = f"Gann: حساب {now.strftime('%H:%M')}"
+        gann_txt = f"Gann: {now.strftime('%H:%M')}"
     day_name = now.strftime('%A %d %B')
     return f"📅 الزمني: {kz}\n⏰ {gann_txt}\n📆 اليوم: {day_name}"
 
@@ -103,15 +102,49 @@ def get_astro_analysis():
     else: moon="🌗 تربيع اخير - هبوط"
     planets = ["شمس - ذهب قوي","قمر - تذبذب","مريخ - عنف","عطارد - تذبذب","مشتري - صعود","زهرة - هدوء","زحل - هبوط"]
     planet_day = planets[now.weekday()]
-    return f"🔮 الفلكي: {moon}\n🪐 اليوم: {planet_day}\n⚠️ وضع فلكي {'مستقر' if lunar<13 or lunar>16 else 'حساس'}"
+    return f"🔮 الفلكي: {moon}\n🪐 اليوم: {planet_day}"
 
 def get_pro_technical(df, price, ema20, rsi):
     close=get_series(df,'Close'); high=get_series(df,'High'); low=get_series(df,'Low')
     recent_high = float(high.tail(50).max()); recent_low = float(low.tail(50).min())
     bos = "BOS هابط قوي" if price < recent_low*1.002 else "BOS صاعد" if price > recent_high*0.998 else "عرضي"
-    rsi_series = ta.momentum.RSIIndicator(close,14).rsi()
     atr = float(ta.volatility.AverageTrueRange(high,low,close,14).average_true_range().iloc[-1])
-    return f"📈 الفني المتقدم:\n- البنية: {bos} (H {recent_high:.0f} / L {recent_low:.0f})\n- RSI {rsi:.0f}: {'مشبع بيعي - ارتداد ممكن' if rsi<35 else 'ضعيف'}\n- ATR {atr:.1f}$ - {'حركة ضعيفة' if atr<12 else 'قوية'}\n- EMA20 {ema20:.0f}: {'تحته سلبي' if price<ema20 else 'فوقه ايجابي'}"
+    return f"📈 الفني: {bos} (H {recent_high:.0f} / L {recent_low:.0f}) | RSI {rsi:.0f} | ATR {atr:.1f}$ | EMA20 {ema20:.0f} {'تحته سلبي' if price<ema20 else 'فوقه'}"
+
+# ===== استراتيجية الفيديو الجديدة - بدون ما تغير قديم =====
+def get_daily_candle_strategy():
+    try:
+        dfd = yf.download("GC=F", period="10d", interval="1d", progress=False, auto_adjust=True, group_by='column').dropna()
+        if len(dfd) < 2: return "📜 يومي: لا يوجد بيانات"
+        high = get_series(dfd,'High'); low = get_series(dfd,'Low'); close = get_series(dfd,'Close')
+        prev_high = float(high.iloc[-2]); prev_low = float(low.iloc[-2])
+        prev_50 = (prev_high + prev_low) / 2
+        live = get_live_price()
+        price = live if live else float(close.iloc[-1])
+
+        dist_high = prev_high - price
+        dist_low = price - prev_low
+        dist_50 = price - prev_50
+
+        txt = f"📜 استراتيجية الشمعة اليومية (الفيديو):\n"
+        txt += f"قمة امبارح {prev_high:.1f} | قاع {prev_low:.1f} | 50% {prev_50:.1f}\n"
+
+        # حسب الفيديو
+        if abs(price - prev_high) < 15: # عند القمة
+            txt += f"🔴 السعر عند قمة شمعة امبارح - بيع حسب الفيديو\n🎯 دخول {price:.1f} | هدف1 {prev_50:.1f} (50%) | هدف2 {prev_low:.1f} (قاع)\n🛑 وقف {prev_high+5:.1f}"
+        elif abs(price - prev_low) < 15: # عند القاع
+            txt += f"🟢 السعر عند قاع شمعة امبارح - شراء حسب الفيديو\n🎯 دخول {price:.1f} | هدف1 {prev_50:.1f} (50%) | هدف2 {prev_high:.1f} (قمة)\n🛑 وقف {prev_low-5:.1f}"
+        elif abs(price - prev_50) < 12: # عند 50%
+            txt += f"⏸️ السعر عند 50% ({prev_50:.1f}) - لا تدخل حسب الفيديو\nانتظر يروح للقمة او القاع"
+        else:
+            # وين اقرب
+            if price > prev_50:
+                txt += f"⏳ السعر بين القمة والـ50% - باقي {dist_high:.0f}$ للقمة للبيع\nاذا طلع ل {prev_high:.0f} بيع، هدف {prev_50:.0f} ثم {prev_low:.0f}"
+            else:
+                txt += f"⏳ السعر بين القاع والـ50% - باقي {dist_low:.0f}$ للقاع للشراء\nاذا نزل ل {prev_low:.0f} اشتري، هدف {prev_50:.0f} ثم {prev_high:.0f}"
+        return txt
+    except Exception as e:
+        return f"📜 يومي: خطأ {e}"
 
 def build():
     live=get_live_price()
@@ -119,7 +152,6 @@ def build():
     close=get_series(df,'Close'); high=get_series(df,'High'); low=get_series(df,'Low')
     price=live if live else float(close.iloc[-1])
     ema20=float(ta.trend.EMAIndicator(close,20).ema_indicator().iloc[-1])
-    ema50=float(ta.trend.EMAIndicator(close,50).ema_indicator().iloc[-1])
     rsi=float(ta.momentum.RSIIndicator(close,14).rsi().iloc[-1])
     zones=find_zones(df)
     fibo, sw_high, sw_low = get_fibo(df)
@@ -151,32 +183,33 @@ def build():
     cet = pytz.timezone('Europe/Berlin')
     now_str = datetime.now(cet).strftime('%H:%M CET %d/%m')
 
-    txt = f"🚨 تحديث تلقائي كل 5 دق - {now_str}\n💰 {price:.2f} (حي) | EMA20 {ema20:.0f} | RSI {rsi:.0f}\n\n"
+    txt = f"🚨 {now_str}\n💰 {price:.2f} (حي) | EMA20 {ema20:.0f} | RSI {rsi:.0f}\n\n"
 
-    # === بيع مباشر مع الهابط - جديد ===
     if price < ema20 and rsi < 40:
         sl_direct = ema20 + 3
         tp_direct = price - 25
-        txt+=f"🔴 بيع مباشر هابط NOW - السوق هابط ✅ ادخل هلا\n🎯 دخول {price:.1f} | 🛑 {sl_direct:.1f} | ✅ {tp_direct:.1f} هدف 4081-4106\n📊 السبب: تحت EMA20 + RSI {rsi:.0f} ضعيف + BOS هابط - متل TradingCentral\n\n"
+        txt+=f"🔴 بيع مباشر هابط NOW ✅ ادخل هلا\n🎯 دخول {price:.1f} | 🛑 {sl_direct:.1f} | ✅ {tp_direct:.1f}\n\n"
 
     if best_supply:
         e=(best_supply['low']+best_supply['high'])/2; sl=best_supply['high']+2.5; tp=price-(sl-price)*2
         diff=e-price
         status="✅ ادخل هلا" if abs(diff)<5 else f"⏳ باقي {diff:.0f}$ ل {e:.0f}"
-        txt+=f"🔴 بيع مؤسسي {status}\n🎯 دخول {e:.1f} | 🛑 {sl:.1f} | ✅ {tp:.1f}\n📊 SUPPLY {best_supply['low']:.0f}-{best_supply['high']:.0f}+FVG\n\n"
+        txt+=f"🔴 بيع مؤسسي {status} - SUPPLY {best_supply['low']:.0f}-{best_supply['high']:.0f}\n🎯 {e:.1f} | 🛑 {sl:.1f} | ✅ {tp:.1f}\n\n"
 
     if best_demand:
         e=(best_demand['low']+best_demand['high'])/2; sl=best_demand['low']-2.5; tp=price+(price-sl)*2
         diff=e-price
         status="✅ ادخل هلا" if abs(diff)<5 else f"⏳ باقي {diff:.0f}$ ل {e:.0f}"
-        txt+=f"🟢 شراء مؤسسي {status}\n🎯 دخول {e:.1f} | 🛑 {sl:.1f} | ✅ {tp:.1f}\n📊 DEMAND {best_demand['low']:.0f}-{best_demand['high']:.0f}\n\n"
+        txt+=f"🟢 شراء مؤسسي {status} - DEMAND {best_demand['low']:.0f}-{best_demand['high']:.0f}\n🎯 {e:.1f} | 🛑 {sl:.1f} | ✅ {tp:.1f}\n\n"
     else:
-        txt+=f"🟢 شراء: لا يوجد DEMAND حاليا\n\n"
+        txt+=f"🟢 شراء: لا يوجد DEMAND\n\n"
 
     if scalp_txt:
         txt+=f"⚡ سكالب: {scalp_txt}\n\n"
-    else:
-        txt+=f"⚡ سكالب: ⏳ لا يوجد دخول مضمون هلا\n\n"
+
+    # ===== اضافة استراتيجية الفيديو =====
+    daily_txt = get_daily_candle_strategy()
+    txt+= daily_txt + "\n\n"
 
     txt+= get_time_cycle_analysis(df) + "\n\n"
     txt+= get_astro_analysis() + "\n\n"
@@ -188,14 +221,14 @@ def build():
 def h(m):
     CHAT_IDS.add(m.chat.id)
     try:
-        bot.send_message(m.chat.id,"⏳ عم حلل بيع مباشر + مؤسسي + CET...")
+        bot.send_message(m.chat.id,"⏳ عم حلل القديم + استراتيجية الشمعة اليومية...")
         txt,p=build()
         with open(p,'rb') as f: bot.send_photo(m.chat.id,f,caption=txt)
     except Exception as e:
         bot.send_message(m.chat.id,f"خطأ {e}")
 
 @app.route('/')
-def home(): return "V24 DIRECT BEAR FIX"
+def home(): return "V25 DAILY + OLD"
 
 def auto_check():
     while True:
