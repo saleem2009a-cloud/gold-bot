@@ -139,3 +139,17 @@ def auto():
 threading.Thread(target=auto,daemon=True).start()
 threading.Thread(target=lambda: app.run(host='0.0.0.0',port=int(os.environ.get("PORT",10000))),daemon=True).start()
 bot.infinity_polling()
+from flask import Flask
+import threading
+import os
+
+app = Flask(__name__)
+@app.route('/')
+def home():
+    return "Bot is Live!"
+
+def run_web():
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
+
+threading.Thread(target=run_web).start()
