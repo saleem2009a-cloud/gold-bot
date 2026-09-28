@@ -1,63 +1,43 @@
-import telebot
-import requests
-import time
-import threading
+import os, time, threading, requests, telebot
 from flask import Flask
-import os
 
 BOT_TOKEN = os.getenv("BOT_TOKEN2")
+if not BOT_TOKEN:
+    print("ERROR: BOT_TOKEN2 not set!")
+    
 bot = telebot.TeleBot(BOT_TOKEN)
-CHANNEL_ID = "@SalimSignals" # او خليه بدون @ اذا بوت خاص
-
 app = Flask(__name__)
+
 @app.route('/')
 def home():
-    return "Bot is Live 24/7!"
+    return "Salim Bot is LIVE! Gold Price Bot Running"
 
-def get_gold_price():
+def get_price():
     try:
-        r = requests.get("https://api.gold-api.com/price/XAU", timeout=10).json()
-        return float(r['price'])
+        r = requests.get("https://api.gold-api.com/price/XAU", timeout=5).json()
+        return r['price']
     except:
-        return 3750.50  # سعر افتراضي اذا فشل
+        return 3765.20
 
-@bot.message_handler(commands=['tawsiya', 'start', 'se3r'])
-@bot.message_handler(func=lambda m: m.text in ['سعر', 'توصية', '/tawsiya'])
-def send_signal(message):
-    price = get_gold_price()
-    text = f"""
-📈 **توصية ذهب مباشرة - Salim Bot V7** 📉
+@bot.message_handler(commands=['start','tawsiya','se3r'])
+@bot.message_handler(func=lambda m: m.text in ['سعر','/tawsiya','توصية'])
+def handle(message):
+    p = get_price()
+    msg = f"📈 **توصية ذهب لحظية**\n\n💰 السعر: ${p}\n📊 الاتجاه: شراء\n🎯 هدف1: ${float(p)+10}\n🎯 هدف2: ${float(p)+20}\n🛑 وقف: ${float(p)-15}\n\n⏰ الآن مباشر - Salim V7"
+    bot.reply_to(message, msg)
 
-💰 السعر الحالي: **${price}**
-📊 النوع: **شراء** 
-🎯 الهدف 1: ${price+8:.2f}
-🎯 الهدف 2: ${price+15:.2f}
-🛑 وقف خسارة: ${price-10:.2f}
-
-🌙 الجلسة الرمضانية: الجلسة الاسيوية
-🌌 الدورة الفلكية: مسار فلكي اعتيادي
-
-⏰ الوقت: الان مباشر
-    """
-    bot.send_message(message.chat.id, text, parse_mode="Markdown")
-
-def auto_signals():
+def run_bot():
+    print("=== Bot started polling ===")
     while True:
         try:
-            price = get_gold_price()
-            text = f"🔔 توصية تلقائية - الذهب الآن ${price} - راقب السوق"
-            # bot.send_message(CHANNEL_ID, text) # شيل # اذا بدك يبعت تلقائي
-            time.sleep(1800) # كل 30 دقيقة
-        except:
-            time.sleep(60)
+            bot.infinity_polling(timeout=60, long_polling_timeout=60)
+        except Exception as e:
+            print(f"Bot error: {e}")
+            time.sleep(5)
 
-# تشغيل الويب سيرفر عشان Render ما يطفيه
 def run_web():
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
 
-threading.Thread(target=run_web, daemon=True).start()
-threading.Thread(target=auto_signals, daemon=True).start()
-
-print("Bot started...")
-bot.infinity_polling()
+# شغل التنين مع بعض
+threading.Thread(target=run_bot, daemon=True).start()
