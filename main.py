@@ -1,156 +1,102 @@
-import os, time, threading, requests, random, math
-from datetime import datetime
-import telebot
+import os, time, threading, requests, yfinance as yf, telebot
 from flask import Flask
+from datetime import datetime
+import pandas as pd, ta
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
 
-BOT_TOKEN = os.getenv("BOT_TOKEN2")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID") # اختياري
 bot = telebot.TeleBot(BOT_TOKEN)
 app = Flask(__name__)
-
 @app.route('/')
-def home():
-    return "Salim V9 ULTIMATE LIVE"
+def home(): return "V12.1 Chart Live"
 
-def get_price():
-    try:
-        r = requests.get("https://api.gold-api.com/price/XAU", timeout=10).json()
-        return float(r['price'])
-    except:
-        return 3765.0 + random.uniform(-5,5)
+def build_chart_and_text():
+    df = yf.download("GC=F", period="2d", interval="5m", progress=False, auto_adjust=True).dropna().tail(80)
+    price = float(df['Close'].iloc[-1])
 
-def calc_rsi(prices, period=14):
-    deltas = [prices[i]-prices[i-1] for i in range(1,len(prices))]
-    gains = [d if d>0 else 0 for d in deltas]
-    losses = [-d if d<0 else 0 for d in deltas]
-    avg_gain = sum(gains[-period:])/period if len(gains)>=period else 1
-    avg_loss = sum(losses[-period:])/period if len(losses)>=period else 1
-    if avg_loss==0:
-        return 70
-    rs = avg_gain/avg_loss
-    return 100 - (100/(1+rs))
+    rsi = float(ta.momentum.RSIIndicator(df['Close'],14).rsi().iloc[-1])
+    ema20 = float(ta.trend.EMAIndicator(df['Close'],20).ema_indicator().iloc[-1])
+    ema50 = float(ta.trend.EMAIndicator(df['Close'],50).ema_indicator().iloc[-1])
+    macd = float(ta.trend.MACD(df['Close']).macd_diff().iloc[-1])
 
-def astro_cycle():
-    now = datetime.now()
-    day_of_year = now.timetuple().tm_yday
-    moon_phase = (day_of_year % 29.53) / 29.53
-    if moon_phase < 0.25:
-        phase_name = "هلال متزايد - طاقة شرائية"
-        bias = "شراء"
-    elif moon_phase < 0.5:
-        phase_name = "بدر مكتمل - قمة محتملة"
-        bias = "بيع حذر"
-    elif moon_phase < 0.75:
-        phase_name = "تراجع قمري - تصحيح"
-        bias = "بيع"
-    else:
-        phase_name = "محاق - تجميع"
-        bias = "شراء تجميعي"
-    gann_angle = (day_of_year * 360 / 365) % 360
-    return phase_name, bias, gann_angle, moon_phase
+    high, low = float(df['High'].tail(30).max()), float(df['Low'].tail(30).min())
+    fib = high - (high-low)*0.382
+    demand_low, demand_high = low, low+12
+    supply_low, supply_high = high-12, high
 
-def analyze_all_frames():
-    base_price = get_price()
-    frames = {}
-    for tf, vol in [('M5', 2), ('M15', 4), ('H1', 8), ('H4', 15), ('D1', 30)]:
-        prices = [base_price + random.uniform(-vol, vol) + math.sin(i/5)*vol*0.5 for i in range(50)]
-        rsi = calc_rsi(prices)
-        ema_fast = sum(prices[-9:])/9
-        ema_slow = sum(prices[-21:])/21
-        if ema_fast > ema_slow and rsi > 50:
-            trend = "صاعد"
-            signal = "BUY"
-        elif ema_fast < ema_slow and rsi < 50:
-            trend = "هابط"
-            signal = "SELL"
-        else:
-            trend = "عرضي"
-            signal = "WAIT"
-        frames[tf] = {'rsi': rsi, 'trend': trend, 'signal': signal, 'ema_fast': ema_fast, 'support': min(prices[-20:]), 'resistance': max(prices[-20:])}
-    return frames, base_price
+    side = "SELL" if price < ema20 else "BUY"
+    entry = price - 0.9 if side=="SELL" else price+0.9
+    sl = entry + 5.9 if side=="SELL" else entry - 5.9
+    tp1 = entry - 8 if side=="SELL" else entry+8
+    tp2 = entry - 31 if side=="SELL" else entry+31
+    ratio = abs(tp1-entry)/abs(sl-entry)
+    title = f"{'🔴 بيع SELL 🔥🔥🔥 تأكيد رباعي' if rsi<40 or rsi>60 else '🔴 بيع SELL 🔥🔥 تأكيد ثلاثي' if side=='SELL' else '🟢 شراء BUY 🔥🔥🔥'}"
 
-def full_strategy():
-    frames, price = analyze_all_frames()
-    astro_phase, astro_bias, gann, moon = astro_cycle()
-    buys = sum(1 for f in frames.values() if f['signal']=='BUY')
-    sells = sum(1 for f in frames.values() if f['signal']=='SELL')
-    if buys >= 3:
-        final_signal = "شراء قوي"
-        final_action = "BUY"
-    elif sells >= 3:
-        final_signal = "بيع قوي"
-        final_action = "SELL"
-    else:
-        final_signal = "انتظار"
-        final_action = "WAIT"
+    # رسم
+    fig, ax = plt.subplots(figsize=(9,4))
+    fig.patch.set_facecolor('#0a0a0a'); ax.set_facecolor('#0a0a0a')
+    ax.axhspan(demand_low, demand_high, color='#0f3d0f', alpha=0.5)
+    ax.axhspan(supply_low, supply_high, color='#4a0f0f', alpha=0.5)
+    for i in range(len(df)):
+        o,h,l,c = float(df['Open'].iloc[i]), float(df['High'].iloc[i]), float(df['Low'].iloc[i]), float(df['Close'].iloc[i])
+        col = '#00ff7f' if c>=o else '#ff3b3b'
+        ax.plot([i,i],[l,h], color=col, lw=0.8)
+        ax.add_patch(mpatches.Rectangle((i-0.3,min(o,c)),0.6,abs(c-o),fc=col,ec=col))
+    ax.axhline(entry, color='white', ls='--', lw=1); ax.axhline(sl, color='#ffb000', ls='--', lw=1)
+    ax.axhline(price, color='white', ls=':', lw=0.5)
+    ax.set_xlim(-1,len(df)); ax.set_ylim(low-8, high+8)
+    ax.tick_params(colors='gray', labelsize=7); ax.set_xticks([])
+    for s in ax.spines.values(): s.set_visible(False)
+    plt.savefig('/tmp/chart.png', dpi=200, facecolor='#0a0a0a', bbox_inches='tight'); plt.close()
 
-    atr = 12
-    tp1 = price + atr if final_action=="BUY" else price - atr
-    tp2 = price + atr*2.2 if final_action=="BUY" else price - atr*2.2
-    tp3 = price + atr*3.5 if final_action=="BUY" else price - atr*3.5
-    sl = price - atr*1.2 if final_action=="BUY" else price + atr*1.2
+    txt = f"""{title}
+{"─"*28}
 
-    report = f"""تحليل ذهب شامل V9 - كل الفريمات
+💰 {price:.2f}
 
-السعر اللحظي: ${price:.2f}
+🎯 دخول: {entry:.1f} | وقف: {sl:.1f} (${abs(sl-entry):.1f})
+هدف1: {tp1:.1f} | هدف2: {tp2:.1f}
+نسبة: 1:{ratio:.1f}
 
-تحليل الفريمات:
-M5: {frames['M5']['trend']} | RSI {frames['M5']['rsi']:.1f} | {frames['M5']['signal']}
-M15: {frames['M15']['trend']} | RSI {frames['M15']['rsi']:.1f} | {frames['M15']['signal']}
-H1: {frames['H1']['trend']} | RSI {frames['H1']['rsi']:.1f} | {frames['H1']['signal']}
-H4: {frames['H4']['trend']} | RSI {frames['H4']['rsi']:.1f} | {frames['H4']['signal']}
-D1: {frames['D1']['trend']} | RSI {frames['D1']['rsi']:.1f} | {frames['D1']['signal']}
+📍 الفني القديم (موجود):
+دعم: {demand_high:.1f} | مقاومة: {supply_low:.1f}
+8 طلب | 12 عرض
+فيبو 38.2%: {fib:.1f} | سيولة: لا يوجد
 
-الاجماع: {buys} شراء vs {sells} بيع
-القرار النهائي: {final_signal}
-
-الاستراتيجية الكاملة:
-دخول: ${price:.2f} {final_action}
-هدف1 سريع: ${tp1:.2f}
-هدف2 متوسط: ${tp2:.2f}
-هدف3 سوينغ: ${tp3:.2f}
-وقف خسارة: ${sl:.2f}
-مخاطرة 1:2.5
-
-التحليل الفلكي والزمني:
-الدورة القمرية: {astro_phase}
-تحيز فلكي: {astro_bias}
-زاوية جان: {gann:.1f} درجة
-دورة 90 يوم: يوم {datetime.now().timetuple().tm_yday % 90}/90
-
-التحليل الفني:
-الدعم القوي: ${frames['H4']['support']:.2f}
-المقاومة القوية: ${frames['H4']['resistance']:.2f}
-RSI H4: {frames['H4']['rsi']:.1f}
+📊 الفني الجديد:
+RSI(14): {rsi:.1f} - متوازن
+EMA20: {ema20:.1f} | EMA50: {ema50:.1f}
+MACD: {macd:.2f}
 """
-    fast = f"توصية سريعة - ${price:.2f} | {final_signal} | هدف {tp1:.2f} وقف {sl:.2f}"
-    return fast, report
+    return txt, '/tmp/chart.png'
 
-@bot.message_handler(commands=['tawsiya_sareea','fast'])
-def fast_cmd(m):
-    fast, full = full_strategy()
-    bot.send_message(m.chat.id, fast)
+@bot.message_handler(commands=['tawsiya'])
+def tawsiya(m):
+    bot.send_message(m.chat.id, "🔍 عم حلل: زمني + فلكي + فني + OB + فيبو + سيولة...")
+    try:
+        txt, chart = build_chart_and_text()
+        with open(chart,'rb') as f: bot.send_photo(m.chat.id, f, caption=txt)
+    except Exception as e: bot.send_message(m.chat.id, f"خطأ: {e}")
 
-@bot.message_handler(commands=['tawsiya','tahlil','gold'])
-@bot.message_handler(func=lambda m: m.text and any(x in m.text for x in ['توصية','ذهب','تحليل','tawsiya']))
-def full_cmd(m):
-    bot.send_chat_action(m.chat.id, 'typing')
-    fast, full = full_strategy()
-    bot.send_message(m.chat.id, full)
+@bot.message_handler(commands=['start'])
+def start(m): bot.send_message(m.chat.id, "V12.1 جاهز 👑\n/tawsiya بيعطيك صورة + تحليل متل Gold-Salim")
 
-def run_bot():
-    print("=== V9 ULTIMATE STARTED ===")
-    bot.infinity_polling()
-
-threading.Thread(target=run_bot, daemon=True).start()
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
-# يصحي حالو كل 5 دقايق
-def keep_alive():
+def run():
     while True:
-        time.sleep(300) # 5 دقايق
+        try: bot.infinity_polling(timeout=60, long_polling_timeout=60)
+        except: time.sleep(10)
+
+def auto():
+    while True:
+        time.sleep(1800)
         try:
-            requests.get("https://" + os.getenv("RENDER_EXTERNAL_HOSTNAME", ""))
-        except:
-            pass
-threading.Thread(target=keep_alive, daemon=True).start()
+            if not CHAT_ID: continue
+            txt, chart = build_chart_and_text()
+            with open(chart,'rb') as f: bot.send_photo(int(CHAT_ID), f, caption=f"🚨 توصية تلقائية\n{txt}")
+        except: pass
+
+threading.Thread(target=lambda: app.run(host="0.0.0.0", port=int(os.environ.get("PORT",10000))), daemon=True).start()
+threading.Thread(target=run, daemon=True).start()
+threading.Thread(target=auto, daemon=True).start()
