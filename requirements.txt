@@ -1,3 +1,7 @@
 pyTelegramBotAPI
 Flask
+yfinance
+pandas
+ta
+matplotlib
 requests
