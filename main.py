@@ -1,6 +1,7 @@
-import os, requests, time
+import os, requests, time, math
+from datetime import datetime, timezone
 TOKEN = "".join(os.getenv("BOT_TOKEN","").split())
-print(f"V24 BUY+SELL BOTH", flush=True)
+print(f"V24 PRO ANALYST + AUTO 5MIN", flush=True)
 
 import telebot, yfinance as yf, pandas as pd, ta
 import matplotlib.pyplot as plt, matplotlib.patches as mpatches
@@ -69,6 +70,54 @@ def build_scalp():
         return f"🔴 سكالب بيع دخول {entry:.1f} وقف {sl:.1f} هدف {tp:.1f}", entry, sl, tp, "SELL"
     return None, None, None, None, None
 
+# ===== تحليل جديد احترافي - ما بيلغي القديم =====
+def get_time_cycle_analysis(df):
+    now = datetime.now(timezone.utc)
+    hour = now.hour
+    # ICT Killzone
+    if 7 <= hour < 10: kz="🌟 لندن Killzone - سيولة عالية"
+    elif 13 <= hour < 16: kz="🌟 نيويورك Killzone - سيولة عالية جدا"
+    elif 19 <= hour < 22: kz="🌙 اسيا - سيولة ضعيفة - تجميع"
+    else: kz="⏳ خارج الكيلزون - حركة بطيئة"
+    # Gann دورة زمنية 90 يوم
+    try:
+        days_since_low = len(df) - int(get_series(df,'Low').tail(200).idxmin())
+        gann = days_since_low % 90
+        gann_txt = f"Gann {gann}/90 يوم - {'انعكاس متوقع' if gann>80 else 'باقي '+str(90-gann)+' يوم للانعكاس'}"
+    except:
+        gann_txt = "Gann: حساب"
+    # دورة 5 ايام
+    weekday = now.weekday()
+    day_txt = ["الاثنين بداية سيولة","الثلاثاء ترند حقيقي","الاربعاء تقلب","الخميس ذروة","الجمعة جني ارباح"][weekday] if weekday<5 else "ويكند"
+    return f"📅 الزمني: {kz}\n⏰ {gann_txt}\n📆 اليوم: {day_txt}"
+
+def get_astro_analysis():
+    now = datetime.now(timezone.utc)
+    # حساب طور القمر مبسط
+    known_new_moon = datetime(2024,1,11,tzinfo=timezone.utc)
+    days = (now - known_new_moon).days
+    lunar = days % 29.53
+    if lunar < 7.3: moon="🌑 محاق - تجميع - شراء قادم"
+    elif lunar < 14.8: moon="🌓 تربيع اول - صعود"
+    elif lunar < 22: moon="🌕 بدر - ذروة - احتمال بيع"
+    else: moon="🌗 تربيع اخير - هبوط"
+    # يوم كوكبي
+    planets = ["شمس - ذهب قوي","قمر - تذبذب","مريخ - حركة عنيفة","عطارد - تذبذب","مشتري - صعود","زهرة - صعود هادئ","زحل - هبوط"]
+    planet_day = planets[now.weekday()]
+    return f"🔮 الفلكي: {moon}\n🪐 اليوم الكوكبي: {planet_day}\n⚠️ {'تجنب اخبار قوية' if lunar>13 and lunar<16 else 'وضع فلكي مستقر'}"
+
+def get_pro_technical(df, price, ema20, rsi):
+    close=get_series(df,'Close'); high=get_series(df,'High'); low=get_series(df,'Low')
+    # ICT BOS
+    recent_high = float(high.tail(50).max()); recent_low = float(low.tail(50).min())
+    bos = "BOS صاعد" if price > recent_high*0.998 else "BOS هابط" if price < recent_low*1.002 else "عرضي"
+    # Divergence
+    rsi_series = ta.momentum.RSIIndicator(close,14).rsi()
+    div = "تباعد صاعد محتمل" if float(close.iloc[-1]) < float(close.iloc[-10]) and float(rsi_series.iloc[-1]) > float(rsi_series.iloc[-10]) else "لا يوجد تباعد واضح"
+    # سيولة
+    atr = float(ta.volatility.AverageTrueRange(high,low,close,14).average_true_range().iloc[-1])
+    return f"📈 الفني المتقدم:\n- البنية: {bos} (H {recent_high:.0f} / L {recent_low:.0f})\n- RSI {rsi:.0f}: {div}\n- التذبذب ATR {atr:.1f}$ - {'حركة قوية' if atr>12 else 'حركة ضعيفة'}\n- EMA20 {ema20:.0f}: {'فوقه ايجابي' if price>ema20 else 'تحته سلبي'}"
+
 def build():
     live=get_live_price()
     df=yf.download("GC=F",period="5d",interval="15m",progress=False,auto_adjust=True,group_by='column').dropna().tail(300)
@@ -80,13 +129,11 @@ def build():
     zones=find_zones(df)
     fibo, sw_high, sw_low = get_fibo(df)
 
-    # === هون التغيير الوحيد: بيعطي التنين سوا ===
     demands = [z for z in zones if z['type']=='DEMAND']
     supplys = [z for z in zones if z['type']=='SUPPLY']
     best_demand = demands[-1] if demands else None
     best_supply = supplys[-1] if supplys else None
 
-    # رسم
     fig,ax=plt.subplots(figsize=(12,6))
     fig.patch.set_facecolor('#0a0a0a'); ax.set_facecolor('#0a0a0a')
     pdf=df.tail(100)
@@ -116,7 +163,7 @@ def build():
         e=(best_supply['low']+best_supply['high'])/2; sl=best_supply['high']+2.5; tp=price-(sl-price)*2
         diff=e-price
         status="✅ ادخل هلا" if abs(diff)<5 else f"⏳ باقي {diff:.0f}$ ل {e:.0f}" if diff>0 else "⏳ فاتت"
-        txt+=f"🔴 بيع SELL - عرض مؤسسي {status}\n🎯 دخول {e:.1f} | 🛑 {sl:.1f} | ✅ {tp:.1f}\n📊 SUPPLY {best_supply['low']:.0f}-{best_supply['high']:.0f}+FVG\n\n"
+        txt+=f"🔴 بيع SELL {status}\n🎯 دخول {e:.1f} | 🛑 {sl:.1f} | ✅ {tp:.1f}\n📊 SUPPLY {best_supply['low']:.0f}-{best_supply['high']:.0f}+FVG\n\n"
     else:
         txt+=f"🔴 بيع: لا يوجد SUPPLY\n\n"
 
@@ -124,14 +171,19 @@ def build():
         e=(best_demand['low']+best_demand['high'])/2; sl=best_demand['low']-2.5; tp=price+(price-sl)*2
         diff=e-price
         status="✅ ادخل هلا" if abs(diff)<5 else f"⏳ باقي {diff:.0f}$ ل {e:.0f}" if diff<0 else "⏳ فاتت"
-        txt+=f"🟢 شراء BUY - طلب مؤسسي {status}\n🎯 دخول {e:.1f} | 🛑 {sl:.1f} | ✅ {tp:.1f}\n📊 DEMAND {best_demand['low']:.0f}-{best_demand['high']:.0f}+FVG\n\n"
+        txt+=f"🟢 شراء BUY {status}\n🎯 دخول {e:.1f} | 🛑 {sl:.1f} | ✅ {tp:.1f}\n📊 DEMAND {best_demand['low']:.0f}-{best_demand['high']:.0f}+FVG\n\n"
     else:
-        txt+=f"🟢 شراء: لا يوجد DEMAND\n\n"
+        txt+=f"🟢 شراء: لا يوجد DEMAND حاليا\n\n"
 
     if scalp_txt:
-        txt+=f"⚡ سكالب: {scalp_txt}\n"
+        txt+=f"⚡ سكالب: {scalp_txt}\n\n"
     else:
-        txt+=f"⚡ سكالب: ⏳ لا يوجد دخول مضمون هلا"
+        txt+=f"⚡ سكالب: ⏳ لا يوجد دخول مضمون هلا\n\n"
+
+    # ===== اضافات جديدة =====
+    txt+= get_time_cycle_analysis(df) + "\n\n"
+    txt+= get_astro_analysis() + "\n\n"
+    txt+= get_pro_technical(df, price, ema20, rsi)
 
     return txt,'/tmp/chart.png'
 
@@ -139,27 +191,29 @@ def build():
 def h(m):
     CHAT_IDS.add(m.chat.id)
     try:
-        bot.send_message(m.chat.id,"⏳ عم حلل بيع + شراء + سكالب...")
+        bot.send_message(m.chat.id,"⏳ عم حلل بيع + شراء + سكالب + زمني + فلكي + فني...")
         txt,p=build()
         with open(p,'rb') as f: bot.send_photo(m.chat.id,f,caption=txt)
     except Exception as e:
         bot.send_message(m.chat.id,f"خطأ {e}")
 
 @app.route('/')
-def home(): return "V24 BOTH"
+def home(): return "V24 PRO + AUTO"
 
 def auto_check():
     while True:
-        time.sleep(300)
+        time.sleep(300) # 5 دقايق
         if not CHAT_IDS: continue
         try:
             txt,p = build()
-            if "ادخل هلا" in txt:
-                for cid in list(CHAT_IDS):
-                    try:
-                        with open(p,'rb') as f: bot.send_photo(cid,f,caption=f"🚨 تنبيه كل 5 دق:\n{txt}")
-                    except: pass
-        except: pass
+            # هون صار يبعت كل 5 دقايق دائما حتى لو باقي 54$ - لانو هيك طلبت
+            for cid in list(CHAT_IDS):
+                try:
+                    with open(p,'rb') as f:
+                        bot.send_photo(cid,f,caption=f"🚨 تحديث تلقائي كل 5 دق\n{txt}")
+                except: pass
+        except Exception as e:
+            print(f"auto {e}", flush=True)
 
 def run():
     while True:
