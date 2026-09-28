@@ -2,7 +2,7 @@ import os, requests, time
 from datetime import datetime
 import pytz
 TOKEN = "".join(os.getenv("BOT_TOKEN","").split())
-print(f"V28 EMA ALWAYS SIGNAL", flush=True)
+print(f"V29 EMA BUY-SELL BALANCED", flush=True)
 
 import telebot, yfinance as yf, pandas as pd, ta
 import matplotlib.pyplot as plt, matplotlib.patches as mpatches
@@ -95,7 +95,7 @@ def get_daily_candle_strategy():
         return txt
     except Exception as e: return f"📜 يومية: خطأ {e}"
 
-# ===== EMA 9/21 مصلحة تعطي توصية دائما =====
+# ===== EMA 9/21 مصلحة تعطي بيع وشراء =====
 def get_ema_cross_strategy():
     try:
         df = yf.download("GC=F", period="5d", interval="5m", progress=False, auto_adjust=True, group_by='column').dropna().tail(300)
@@ -103,6 +103,7 @@ def get_ema_cross_strategy():
         ema9_s = ta.trend.EMAIndicator(close,9).ema_indicator()
         ema21_s = ta.trend.EMAIndicator(close,21).ema_indicator()
         e9 = float(ema9_s.iloc[-1]); e21 = float(ema21_s.iloc[-1])
+        e9_prev = float(ema9_s.iloc[-2]); e21_prev = float(ema21_s.iloc[-2])
         price = float(close.iloc[-1])
         live = get_live_price()
         if live: price = live
@@ -110,18 +111,13 @@ def get_ema_cross_strategy():
         swing_high = float(high.tail(100).max()); swing_low = float(low.tail(100).min())
         fib_50 = (swing_high + swing_low)/2
 
-        # دعم ومقاومة قريب
         recent_low = float(low.tail(30).min())
         recent_high = float(high.tail(30).max())
-        # اقرب دعم/مقاومة من اخر 100 شمعة
-        lows = []
-        highs = []
+        lows = []; highs = []
         for i in range(20, len(df)-5):
-            h = float(get_series(df,'High').iloc[i])
-            l = float(get_series(df,'Low').iloc[i])
+            h = float(get_series(df,'High').iloc[i]); l = float(get_series(df,'Low').iloc[i])
             if h == float(get_series(df,'High').iloc[i-2:i+3].max()): highs.append(h)
             if l == float(get_series(df,'Low').iloc[i-2:i+3].min()): lows.append(l)
-
         sup = max([x for x in lows if x < price], default=recent_low)
         res = min([x for x in highs if x > price], default=recent_high)
 
@@ -129,26 +125,24 @@ def get_ema_cross_strategy():
         txt += f"ابيض EMA9 {e9:.1f} | ازرق EMA21 {e21:.1f} | سعر {price:.1f}\n"
         txt += f"فيبو 50% {fib_50:.0f} | دعم {sup:.0f} | مقاومة {res:.0f}\n"
 
-        if e9 > e21:
-            # ترند صاعد - شراء
-            sl = sup - 4 if sup else price - 12
-            tp = price + (price - sl)*2
-            if abs(price - sup) < 18:
-                txt += f"🟢 EMA9 فوق EMA21 - ترند صاعد + عند دعم {sup:.0f} ✅ شراء مباشر\n🎯 دخول {price:.1f} | 🛑 {sl:.1f} | ✅ {tp:.1f} (1:2)\n💡 السبب: تقاطع صاعد + ارتداد من دعم + بريميوم تحت 50%"
+        # المنطق الجديد المتوازن - السعر اهم من التقاطع
+        if price < e9 and price < e21:
+            # السعر تحت الاتنين = هبوط قوي - بيع
+            sl = res if res > price else e21 + 6
+            if abs(res - price) < 25:
+                txt += f"🔴 السعر تحت EMA9 و EMA21 - هبوط قوي ✅ بيع مباشر\n🎯 دخول {price:.1f} | 🛑 {sl:.1f} | ✅ {price - (sl-price)*1.5:.1f}\n💡 السبب: تحت الابيض والازرق + مقاومة {res:.0f} + خصم"
             else:
-                txt += f"🟢 EMA9 فوق EMA21 - ترند صاعد\n🎯 شراء معلق عند دعم {sup:.0f}\n🛑 وقف {sup-4:.0f} | ✅ هدف {sup + (sup-(sup-4))*3:.0f}\n⏳ باقي {price-sup:.0f}$ للدعم - انتظر وصول"
+                txt += f"🔴 السعر تحت EMA9 و EMA21 - هبوط قوي ✅ بيع مباشر\n🎯 دخول {price:.1f} | 🛑 {e21+5:.1f} | ✅ {price-18:.1f}\n💡 مقاومة قادمة {res:.0f}"
+        elif price > e9 and price > e21:
+            # السعر فوق الاتنين = صعود قوي - شراء
+            sl = sup if sup < price else e21 - 6
+            txt += f"🟢 السعر فوق EMA9 و EMA21 - صعود قوي ✅ شراء مباشر\n🎯 دخول {price:.1f} | 🛑 {sl:.1f} | ✅ {price + (price-sl)*1.5:.1f}\n💡 السبب: فوق الابيض والازرق + دعم {sup:.0f}"
         else:
-            # ترند هابط - بيع
-            sl = res + 4 if res else price + 12
-            tp = price - (sl - price)*2
-            if abs(res - price) < 18:
-                txt += f"🔴 EMA9 تحت EMA21 - ترند هابط + عند مقاومة {res:.0f} ✅ بيع مباشر\n🎯 دخول {price:.1f} | 🛑 {sl:.1f} | ✅ {tp:.1f} (1:2)\n💡 السبب: تقاطع هابط + ارتداد من مقاومة + خصم فوق 50%"
+            # السعر بين EMA9 و EMA21 = انتظار تقاطع
+            if e9 > e21:
+                txt += f"🟡 السعر بين EMA9 و EMA21 - ترند صاعد ضعيف\n⏳ انتظر اختراق فوق {e9:.0f} للشراء او كسر تحت {e21:.0f} للبيع\nدعم {sup:.0f} | مقاومة {res:.0f}"
             else:
-                # حتى لو بعيد عن المقاومة - نعطي بيع لان ترند هابط
-                if price < e9 and price < e21:
-                    txt += f"🔴 EMA9 تحت EMA21 - ترند هابط ✅ بيع مباشر هلا\n🎯 دخول {price:.1f} | 🛑 {e21+5:.1f} | ✅ {price-20:.1f}\n💡 السعر تحت الابيض والازرق - هبوط قوي\nمقاومة قادمة {res:.0f} - هدف ثاني {sup:.0f}"
-                else:
-                    txt += f"🔴 EMA9 تحت EMA21 - ترند هابط\n🎯 بيع معلق عند مقاومة {res:.0f}\n🛑 وقف {res+4:.0f} | ✅ هدف {res - (res+4-res)*3:.0f}\n⏳ باقي {res-price:.0f}$ للمقاومة"
+                txt += f"🟡 السعر بين EMA9 و EMA21 - ترند هابط ضعيف\n⏳ انتظر كسر تحت {e9:.0f} للبيع او اختراق فوق {e21:.0f} للشراء\nدعم {sup:.0f} | مقاومة {res:.0f}"
 
         return txt
     except Exception as e:
@@ -203,7 +197,7 @@ def h(m):
     except Exception as e: bot.send_message(m.chat.id,f"خطأ {e}")
 
 @app.route('/')
-def home(): return "V28 FIXED EMA"
+def home(): return "V29 FIXED"
 
 def auto_check():
     while True:
