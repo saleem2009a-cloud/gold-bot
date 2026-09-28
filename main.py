@@ -1,6 +1,6 @@
 import os, requests, time
 TOKEN = "".join(os.getenv("BOT_TOKEN","").split())
-print(f"V24 + AUTO 5MIN", flush=True)
+print(f"V24 BUY+SELL BOTH", flush=True)
 
 import telebot, yfinance as yf, pandas as pd, ta
 import matplotlib.pyplot as plt, matplotlib.patches as mpatches
@@ -10,10 +10,7 @@ import threading
 
 app = Flask(__name__)
 bot = telebot.TeleBot(TOKEN)
-
-# === التنبيه - فاضي بيتعبى لحالو ===
 CHAT_IDS = set()
-LAST_ALERT = {}
 
 def get_series(df,col):
     s=df[col]
@@ -66,10 +63,10 @@ def build_scalp():
     recent_high=float(high.tail(10).max())
     if price > ema9 > ema21 and 45 < rsi < 68 and price - recent_low < 4:
         entry=price; sl=recent_low - 1; tp=price + (atr*1.8)
-        return f"🟢 سكالب سريع شراء\nدخول {entry:.1f} وقف {sl:.1f} هدف {tp:.1f}\nالسبب: فوق EMA9 {ema9:.0f} + EMA21 {ema21:.0f} + RSI {rsi:.0f}", entry, sl, tp, "BUY"
+        return f"🟢 سكالب شراء دخول {entry:.1f} وقف {sl:.1f} هدف {tp:.1f}", entry, sl, tp, "BUY"
     if price < ema9 < ema21 and 32 < rsi < 55 and recent_high - price < 4:
         entry=price; sl=recent_high + 1; tp=price - (atr*1.8)
-        return f"🔴 سكالب سريع بيع\nدخول {entry:.1f} وقف {sl:.1f} هدف {tp:.1f}\nالسبب: تحت EMA9 {ema9:.0f} + EMA21 {ema21:.0f} + RSI {rsi:.0f}", entry, sl, tp, "SELL"
+        return f"🔴 سكالب بيع دخول {entry:.1f} وقف {sl:.1f} هدف {tp:.1f}", entry, sl, tp, "SELL"
     return None, None, None, None, None
 
 def build():
@@ -82,21 +79,14 @@ def build():
     rsi=float(ta.momentum.RSIIndicator(close,14).rsi().iloc[-1])
     zones=find_zones(df)
     fibo, sw_high, sw_low = get_fibo(df)
-    is_uptrend = price > ema20 and ema20 > ema50
-    valid_zones = [z for z in zones if (z['type']=='DEMAND' and is_uptrend) or (z['type']=='SUPPLY' and not is_uptrend)]
-    best = valid_zones[-1] if valid_zones else (zones[-1] if zones else None)
-    if best:
-        if best['type']=='DEMAND':
-            direction="🟢 شراء BUY - عرض طلب مؤسسي"
-            entry=(best['low']+best['high'])/2; sl=best['low']-2.5; tp1=price+(price-sl)*2; tp2=fibo['1.382']
-            extra=f"DEMAND {best['low']:.0f}-{best['high']:.0f} + FVG"
-        else:
-            direction="🔴 بيع SELL - عرض مؤسسي"
-            entry=(best['low']+best['high'])/2; sl=best['high']+2.5; tp1=price-(sl-price)*2; tp2=fibo['0']
-            extra=f"SUPPLY {best['low']:.0f}-{best['high']:.0f} + FVG"
-    else:
-        direction="🔴 بيع SELL"; entry=price+2; sl=entry+8; tp1=price-12; tp2=fibo['0']; extra="EMA"
-    scalp_txt, s_entry, s_sl, s_tp, s_dir = build_scalp()
+
+    # === هون التغيير الوحيد: بيعطي التنين سوا ===
+    demands = [z for z in zones if z['type']=='DEMAND']
+    supplys = [z for z in zones if z['type']=='SUPPLY']
+    best_demand = demands[-1] if demands else None
+    best_supply = supplys[-1] if supplys else None
+
+    # رسم
     fig,ax=plt.subplots(figsize=(12,6))
     fig.patch.set_facecolor('#0a0a0a'); ax.set_facecolor('#0a0a0a')
     pdf=df.tail(100)
@@ -112,55 +102,65 @@ def build():
     for k,v in fibo.items():
         if k in ['0.236','0.618','1','0']:
             ax.axhline(v,color='#3b82f6',ls='--',lw=0.5,alpha=0.6)
-    ax.axhline(entry,color='white',ls='--',lw=1.2); ax.axhline(sl,color='#ffaa00',ls='--',lw=1)
+    if best_supply: ax.axhline((best_supply['low']+best_supply['high'])/2,color='white',ls='--',lw=1.2)
+    if best_demand: ax.axhline((best_demand['low']+best_demand['high'])/2,color='white',ls='--',lw=1.2)
     ax.set_xlim(-1,len(pdf)); ax.set_xticks([])
     for s in ax.spines.values(): s.set_visible(False)
     plt.savefig('/tmp/chart.png',dpi=190,facecolor='#0a0a0a',bbox_inches='tight'); plt.close()
-    diff=entry-price
-    if abs(diff)<5: status="✅ ادخل هلا"
-    elif diff>0: status=f"⏳ انتظر - باقي {diff:.0f}$ ل {entry:.0f}"
-    else: status=f"⏳ فاتت - انتظر منطقة جديدة"
-    main_txt=f"""{direction} {status}
-💰 {price:.2f} (حي)
-🎯 دخول {entry:.1f} | 🛑 {sl:.1f} | ✅ {tp1:.1f} | فيبو {tp2:.1f}
-📊 {extra} | EMA20 {ema20:.0f} | RSI {rsi:.0f}
-"""
-    if scalp_txt:
-        main_txt+=f"\n\n⚡ صفقة سريعة مضمونة (5 دقائق):\n{scalp_txt}\n⏱️ صلاحية 30 دقيقة"
+
+    scalp_txt, s_entry, s_sl, s_tp, s_dir = build_scalp()
+
+    txt = f"💰 {price:.2f} (حي) | EMA20 {ema20:.0f} | RSI {rsi:.0f}\n\n"
+
+    if best_supply:
+        e=(best_supply['low']+best_supply['high'])/2; sl=best_supply['high']+2.5; tp=price-(sl-price)*2
+        diff=e-price
+        status="✅ ادخل هلا" if abs(diff)<5 else f"⏳ باقي {diff:.0f}$ ل {e:.0f}" if diff>0 else "⏳ فاتت"
+        txt+=f"🔴 بيع SELL - عرض مؤسسي {status}\n🎯 دخول {e:.1f} | 🛑 {sl:.1f} | ✅ {tp:.1f}\n📊 SUPPLY {best_supply['low']:.0f}-{best_supply['high']:.0f}+FVG\n\n"
     else:
-        main_txt+=f"\n\n⚡ سكالب سريع: ⏳ لا يوجد دخول مضمون هلا"
-    return main_txt,'/tmp/chart.png'
+        txt+=f"🔴 بيع: لا يوجد SUPPLY\n\n"
+
+    if best_demand:
+        e=(best_demand['low']+best_demand['high'])/2; sl=best_demand['low']-2.5; tp=price+(price-sl)*2
+        diff=e-price
+        status="✅ ادخل هلا" if abs(diff)<5 else f"⏳ باقي {diff:.0f}$ ل {e:.0f}" if diff<0 else "⏳ فاتت"
+        txt+=f"🟢 شراء BUY - طلب مؤسسي {status}\n🎯 دخول {e:.1f} | 🛑 {sl:.1f} | ✅ {tp:.1f}\n📊 DEMAND {best_demand['low']:.0f}-{best_demand['high']:.0f}+FVG\n\n"
+    else:
+        txt+=f"🟢 شراء: لا يوجد DEMAND\n\n"
+
+    if scalp_txt:
+        txt+=f"⚡ سكالب: {scalp_txt}\n"
+    else:
+        txt+=f"⚡ سكالب: ⏳ لا يوجد دخول مضمون هلا"
+
+    return txt,'/tmp/chart.png'
 
 @bot.message_handler(commands=['tawsiya','start'])
 def h(m):
-    CHAT_IDS.add(m.chat.id) # بيسجل رقمك لحالو
+    CHAT_IDS.add(m.chat.id)
     try:
-        bot.send_message(m.chat.id,"⏳ عم حلل الرئيسي + السكالب...")
+        bot.send_message(m.chat.id,"⏳ عم حلل بيع + شراء + سكالب...")
         txt,p=build()
         with open(p,'rb') as f: bot.send_photo(m.chat.id,f,caption=txt)
-        bot.send_message(m.chat.id,"🔔 تم تفعيل التنبيه كل 5 دقايق - رح ابعتلك الصفقات لحالو")
     except Exception as e:
         bot.send_message(m.chat.id,f"خطأ {e}")
 
-# === حلقة التنبيه كل 5 دقايق ===
+@app.route('/')
+def home(): return "V24 BOTH"
+
 def auto_check():
     while True:
-        time.sleep(300) # كل 5 دقايق
+        time.sleep(300)
         if not CHAT_IDS: continue
         try:
             txt,p = build()
-            # اذا في دخول هلا (سكالب او رئيسي)
-            if "ادخل هلا" in txt or "سكالب سريع شراء" in txt or "سكالب سريع بيع" in txt:
+            if "ادخل هلا" in txt:
                 for cid in list(CHAT_IDS):
                     try:
-                        with open(p,'rb') as f:
-                            bot.send_photo(cid, f, caption=f"🚨 تنبيه تلقائي كل 5 دق\n{txt}")
+                        with open(p,'rb') as f: bot.send_photo(cid,f,caption=f"🚨 تنبيه كل 5 دق:\n{txt}")
                     except: pass
-        except Exception as e:
-            print(f"auto error {e}", flush=True)
+        except: pass
 
-@app.route('/')
-def home(): return "V24 + AUTO 5MIN"
 def run():
     while True:
         try: bot.infinity_polling(timeout=60,long_polling_timeout=60)
@@ -168,16 +168,5 @@ def run():
 
 threading.Thread(target=run,daemon=True).start()
 threading.Thread(target=auto_check,daemon=True).start()
-
 if __name__=="__main__":
     app.run(host="0.0.0.0",port=int(os.environ.get("PORT",10000)))
-    # بيعطي شراء وبيع - اقرب منطقة طلب واقرب منطقة عرض
-    demands = [z for z in zones if z['type']=='DEMAND']
-    supplys = [z for z in zones if z['type']=='SUPPLY']
-    best_supply = supplys[-1] if supplys else None
-    best_demand = demands[-1] if demands else None
-    # بيختار الاقرب للسعر
-    if best_supply and best_demand:
-        best = best_supply if abs(price - (best_supply['low']+best_supply['high'])/2) < abs(price - (best_demand['low']+best_demand['high'])/2) else best_demand
-    else:
-        best = best_supply or best_demand or (zones[-1] if zones else None)
