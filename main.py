@@ -145,3 +145,12 @@ threading.Thread(target=run_bot, daemon=True).start()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+# يصحي حالو كل 5 دقايق
+def keep_alive():
+    while True:
+        time.sleep(300) # 5 دقايق
+        try:
+            requests.get("https://" + os.getenv("RENDER_EXTERNAL_HOSTNAME", ""))
+        except:
+            pass
+threading.Thread(target=keep_alive, daemon=True).start()
