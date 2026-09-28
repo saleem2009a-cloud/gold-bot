@@ -171,3 +171,13 @@ threading.Thread(target=auto_check,daemon=True).start()
 
 if __name__=="__main__":
     app.run(host="0.0.0.0",port=int(os.environ.get("PORT",10000)))
+    # بيعطي شراء وبيع - اقرب منطقة طلب واقرب منطقة عرض
+    demands = [z for z in zones if z['type']=='DEMAND']
+    supplys = [z for z in zones if z['type']=='SUPPLY']
+    best_supply = supplys[-1] if supplys else None
+    best_demand = demands[-1] if demands else None
+    # بيختار الاقرب للسعر
+    if best_supply and best_demand:
+        best = best_supply if abs(price - (best_supply['low']+best_supply['high'])/2) < abs(price - (best_demand['low']+best_demand['high'])/2) else best_demand
+    else:
+        best = best_supply or best_demand or (zones[-1] if zones else None)
