@@ -2,7 +2,7 @@ import os, requests, time, math
 from datetime import datetime
 import pytz
 TOKEN = "".join(os.getenv("BOT_TOKEN","").split())
-print(f"V25 DAILY CANDLE + OLD", flush=True)
+print(f"V26 FIXED DAILY", flush=True)
 
 import telebot, yfinance as yf, pandas as pd, ta
 import matplotlib.pyplot as plt, matplotlib.patches as mpatches
@@ -109,39 +109,38 @@ def get_pro_technical(df, price, ema20, rsi):
     recent_high = float(high.tail(50).max()); recent_low = float(low.tail(50).min())
     bos = "BOS هابط قوي" if price < recent_low*1.002 else "BOS صاعد" if price > recent_high*0.998 else "عرضي"
     atr = float(ta.volatility.AverageTrueRange(high,low,close,14).average_true_range().iloc[-1])
-    return f"📈 الفني: {bos} (H {recent_high:.0f} / L {recent_low:.0f}) | RSI {rsi:.0f} | ATR {atr:.1f}$ | EMA20 {ema20:.0f} {'تحته سلبي' if price<ema20 else 'فوقه'}"
+    return f"📈 الفني: {bos} (H {recent_high:.0f} / L {recent_low:.0f}) | RSI {rsi:.0f} | ATR {atr:.1f}$ | EMA20 {ema20:.0f}"
 
-# ===== استراتيجية الفيديو الجديدة - بدون ما تغير قديم =====
+# ===== استراتيجية الشمعة اليومية مصلحة =====
 def get_daily_candle_strategy():
     try:
         dfd = yf.download("GC=F", period="10d", interval="1d", progress=False, auto_adjust=True, group_by='column').dropna()
-        if len(dfd) < 2: return "📜 يومي: لا يوجد بيانات"
-        high = get_series(dfd,'High'); low = get_series(dfd,'Low'); close = get_series(dfd,'Close')
+        high = get_series(dfd,'High'); low = get_series(dfd,'Low')
         prev_high = float(high.iloc[-2]); prev_low = float(low.iloc[-2])
         prev_50 = (prev_high + prev_low) / 2
         live = get_live_price()
-        price = live if live else float(close.iloc[-1])
-
-        dist_high = prev_high - price
-        dist_low = price - prev_low
-        dist_50 = price - prev_50
+        dfm = yf.download("GC=F", period="1d", interval="1m", progress=False, auto_adjust=True).dropna()
+        c = get_series(dfm,'Close') if len(dfm)>0 else get_series(dfd,'Close')
+        price = live if live else float(c.iloc[-1])
 
         txt = f"📜 استراتيجية الشمعة اليومية (الفيديو):\n"
-        txt += f"قمة امبارح {prev_high:.1f} | قاع {prev_low:.1f} | 50% {prev_50:.1f}\n"
+        txt += f"قمة امبارح {prev_high:.1f} | قاع {prev_low:.1f} | 50% {prev_50:.1f}\nسعر هلا {price:.1f}\n"
 
-        # حسب الفيديو
-        if abs(price - prev_high) < 15: # عند القمة
-            txt += f"🔴 السعر عند قمة شمعة امبارح - بيع حسب الفيديو\n🎯 دخول {price:.1f} | هدف1 {prev_50:.1f} (50%) | هدف2 {prev_low:.1f} (قاع)\n🛑 وقف {prev_high+5:.1f}"
-        elif abs(price - prev_low) < 15: # عند القاع
-            txt += f"🟢 السعر عند قاع شمعة امبارح - شراء حسب الفيديو\n🎯 دخول {price:.1f} | هدف1 {prev_50:.1f} (50%) | هدف2 {prev_high:.1f} (قمة)\n🛑 وقف {prev_low-5:.1f}"
-        elif abs(price - prev_50) < 12: # عند 50%
-            txt += f"⏸️ السعر عند 50% ({prev_50:.1f}) - لا تدخل حسب الفيديو\nانتظر يروح للقمة او القاع"
-        else:
-            # وين اقرب
-            if price > prev_50:
-                txt += f"⏳ السعر بين القمة والـ50% - باقي {dist_high:.0f}$ للقمة للبيع\nاذا طلع ل {prev_high:.0f} بيع، هدف {prev_50:.0f} ثم {prev_low:.0f}"
+        if price >= prev_high - 10:
+            txt += f"🔴 عند قمة امبارح - بيع مباشر ✅ ادخل هلا\n🎯 دخول {price:.1f} | هدف1 {prev_50:.1f} | هدف2 {prev_low:.1f}\n🛑 وقف {prev_high+8:.1f}"
+        elif price <= prev_low + 10:
+            txt += f"🟢 عند قاع امبارح او كاسرو - شراء مباشر ✅ ادخل هلا\n🎯 دخول {price:.1f} | هدف1 {prev_50:.1f} | هدف2 {prev_high:.1f}\n🛑 وقف {prev_low-8:.1f}"
+        elif price > prev_50:
+            dist = prev_high - price
+            txt += f"🔴 فوق 50% - bias بيع فقط\n⏳ باقي {dist:.0f}$ للقمة للبيع\nاذا طلع ل {prev_high:.0f} بيع، هدف1 {prev_50:.0f} ثم {prev_low:.0f}"
+        elif price < prev_50:
+            if price < prev_low:
+                txt += f"🟢 تحت القاع ب {abs(price-prev_low):.0f}$ - كسر وهمي - شراء مباشر ✅\n🎯 دخول {price:.1f} | هدف1 {prev_50:.1f} | هدف2 {prev_high:.1f}"
             else:
-                txt += f"⏳ السعر بين القاع والـ50% - باقي {dist_low:.0f}$ للقاع للشراء\nاذا نزل ل {prev_low:.0f} اشتري، هدف {prev_50:.0f} ثم {prev_high:.0f}"
+                dist = price - prev_low
+                txt += f"🟢 تحت 50% - bias شراء فقط\n⏳ باقي {dist:.0f}$ للقاع للشراء\nاذا نزل ل {prev_low:.0f} اشتري، هدف1 {prev_50:.0f} ثم {prev_high:.0f}"
+        else:
+            txt += f"⏸️ عند 50% - لا تدخل"
         return txt
     except Exception as e:
         return f"📜 يومي: خطأ {e}"
@@ -154,8 +153,6 @@ def build():
     ema20=float(ta.trend.EMAIndicator(close,20).ema_indicator().iloc[-1])
     rsi=float(ta.momentum.RSIIndicator(close,14).rsi().iloc[-1])
     zones=find_zones(df)
-    fibo, sw_high, sw_low = get_fibo(df)
-
     demands = [z for z in zones if z['type']=='DEMAND']
     supplys = [z for z in zones if z['type']=='SUPPLY']
     best_demand = demands[-1] if demands else None
@@ -207,10 +204,7 @@ def build():
     if scalp_txt:
         txt+=f"⚡ سكالب: {scalp_txt}\n\n"
 
-    # ===== اضافة استراتيجية الفيديو =====
-    daily_txt = get_daily_candle_strategy()
-    txt+= daily_txt + "\n\n"
-
+    txt+= get_daily_candle_strategy() + "\n\n"
     txt+= get_time_cycle_analysis(df) + "\n\n"
     txt+= get_astro_analysis() + "\n\n"
     txt+= get_pro_technical(df, price, ema20, rsi)
@@ -221,14 +215,14 @@ def build():
 def h(m):
     CHAT_IDS.add(m.chat.id)
     try:
-        bot.send_message(m.chat.id,"⏳ عم حلل القديم + استراتيجية الشمعة اليومية...")
+        bot.send_message(m.chat.id,"⏳ عم حلل...")
         txt,p=build()
         with open(p,'rb') as f: bot.send_photo(m.chat.id,f,caption=txt)
     except Exception as e:
         bot.send_message(m.chat.id,f"خطأ {e}")
 
 @app.route('/')
-def home(): return "V25 DAILY + OLD"
+def home(): return "V26 FIXED DAILY"
 
 def auto_check():
     while True:
@@ -238,11 +232,9 @@ def auto_check():
             txt,p = build()
             for cid in list(CHAT_IDS):
                 try:
-                    with open(p,'rb') as f:
-                        bot.send_photo(cid,f,caption=txt)
+                    with open(p,'rb') as f: bot.send_photo(cid,f,caption=txt)
                 except: pass
-        except Exception as e:
-            print(f"auto {e}", flush=True)
+        except: pass
 
 def run():
     while True:
