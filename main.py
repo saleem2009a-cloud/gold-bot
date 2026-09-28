@@ -182,3 +182,19 @@ def run():
 threading.Thread(target=run,daemon=True).start()
 if __name__=="__main__":
     app.run(host="0.0.0.0",port=int(os.environ.get("PORT",10000)))
+    diff = entry - price
+    if diff < 5 and diff > -5:
+        status = "✅ ادخل هلا بيع - السعر وصل المنطقة"
+    elif diff > 0:
+        status = f"⏳ انتظر - لا تدخل - السعر تحت المنطقة ب {diff:.0f}$ - لازم يطلع ل {entry:.0f}"
+    else:
+        status = f"⏳ فاتت - السعر نزل تحت - انتظر منطقة جديدة"
+
+    txt=f"""{direction} {status}
+💰 {price:.2f} (حي)
+
+🎯 دخول: {entry:.1f}
+🛑 وقف: {sl:.1f}
+✅ هدف1: {tp1:.1f}
+✅ هدف2: {tp2:.1f}
+"""
