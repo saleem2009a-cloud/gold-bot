@@ -1,11 +1,11 @@
 import os, requests, time
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz
 TOKEN = "".join(os.getenv("BOT_TOKEN","").split())
-print(f"V31 ULTRA SMART", flush=True)
+print(f"V32 AMD SMART - NO OLD BS", flush=True)
 
 import telebot, yfinance as yf, pandas as pd, ta
-import matplotlib.pyplot as plt, matplotlib.patches as mpatches
+import matplotlib.pyplot as plt
 import numpy as np
 from flask import Flask
 import threading
@@ -13,7 +13,7 @@ import threading
 app = Flask(__name__)
 bot = telebot.TeleBot(TOKEN)
 CHAT_IDS = set()
-LAST_ALERT = 0 # مشان ما يزعجك كل 5 دقايق
+LAST_ALERT = 0
 
 def get_series(df,col):
     s=df[col]
@@ -27,176 +27,176 @@ def get_live_price():
     except:
         try:
             df=yf.download("GC=F",period="1d",interval="1m",progress=False,auto_adjust=True).dropna()
-            c=get_series(df,'Close')
-            return float(c.iloc[-1])
+            return float(get_series(df,'Close').iloc[-1])
         except: return None
 
-def analyze_tf(tf_name, period, interval):
+def get_amd_analysis():
     try:
-        df = yf.download("GC=F", period=period, interval=interval, progress=False, auto_adjust=True, group_by='column').dropna().tail(200)
-        if len(df)<50: return None
-        close=get_series(df,'Close'); high=get_series(df,'High'); low=get_series(df,'Low')
-        price=float(close.iloc[-1])
-        ema9=float(ta.trend.EMAIndicator(close,9).ema_indicator().iloc[-1])
-        ema21=float(ta.trend.EMAIndicator(close,21).ema_indicator().iloc[-1])
-        rsi=float(ta.momentum.RSIIndicator(close,14).rsi().iloc[-1])
-        # BOS
-        rh=float(high.tail(50).max()); rl=float(low.tail(50).min())
-        if price > rh*0.998: bos="صاعد قوي"
-        elif price < rl*1.002: bos="هابط قوي"
-        elif ema9 > ema21 and price > ema9: bos="صاعد"
-        elif ema9 < ema21 and price < ema9: bos="هابط"
-        else: bos="عرضي"
-        return {"tf":tf_name, "price":price, "ema9":ema9, "ema21":ema21, "rsi":rsi, "bos":bos, "high":rh, "low":rl, "df":df}
-    except:
-        return None
+        cet = pytz.timezone('Europe/Berlin')
+        now = datetime.now(cet)
+        # نجيب داتا 2 يوم 5 دقايق
+        df = yf.download("GC=F", period="3d", interval="5m", progress=False, auto_adjust=True, group_by='column').dropna().tail(1000)
+        if len(df)<200:
+            return None, None, "داتا قليلة"
 
-def get_daily_levels():
-    try:
-        dfd = yf.download("GC=F", period="10d", interval="1d", progress=False, auto_adjust=True, group_by='column').dropna()
-        high=get_series(dfd,'High'); low=get_series(dfd,'Low')
-        prev_h=float(high.iloc[-2]); prev_l=float(low.iloc[-2])
-        return prev_h, prev_l, (prev_h+prev_l)/2
-    except:
-        return None,None,None
+        df.index = df.index.tz_localize('UTC').tz_convert(cet) if df.index.tz is None else df.index.tz_convert(cet)
 
-def build_ultra():
-    live=get_live_price()
-    # نحلل كل الفريمات
-    tfs = [
-        analyze_tf("5د", "5d", "5m"),
-        analyze_tf("15د", "5d", "15m"),
-        analyze_tf("1س", "30d", "60m"),
-        analyze_tf("4س", "60d", "240m"),
-        analyze_tf("يومي", "30d", "1d"),
-    ]
-    tfs = [x for x in tfs if x]
-    if not tfs: return None, None, 0
+        close=get_series(df,'Close'); high=get_series(df,'High'); low=get_series(df,'Low'); open_=get_series(df,'Open')
+        price = get_live_price() or float(close.iloc[-1])
 
-    price = live if live else tfs[1]['price'] if len(tfs)>1 else tfs[0]['price']
-    prev_h, prev_l, prev_50 = get_daily_levels()
+        # 1. اسيا - من 01:00 ل 08:00 CET
+        asia_df = df.between_time("01:00","07:59")
+        if len(asia_df)<10:
+            asia_df = df.tail(100) # fallback
+        asia_high = float(get_series(asia_df,'High').max())
+        asia_low = float(get_series(asia_df,'Low').min())
+        asia_range = asia_high - asia_low
 
-    # حساب نقاط التلاقي - Confluence Score
-    score = 0
-    reasons = []
-    buy_votes = 0
-    sell_votes = 0
+        # 2. لندن - 08:00 ل 13:30
+        london_df = df.between_time("08:00","13:30")
+        london_high = float(get_series(london_df,'High').max()) if len(london_df)>0 else price
+        london_low = float(get_series(london_df,'Low').min()) if len(london_df)>0 else price
 
-    for tf in tfs:
-        if "صاعد" in tf['bos']:
-            buy_votes+=1
-            score+=1 if tf['tf'] in ["1س","4س"] else 0.5
-        if "هابط" in tf['bos']:
-            sell_votes+=1
-            score+=1 if tf['tf'] in ["1س","4س"] else 0.5
+        # هل اسيا ضيق؟
+        is_tight = asia_range <= 22 # للذهب 22$ يعتبر ضيق
+        asia_score = "✅ ضيق ممتاز" if asia_range <=15 else "✅ ضيق" if is_tight else f"❌ واسع {asia_range:.1f}$ - لا تتداول"
 
-        # RSI
-        if tf['rsi'] < 30:
-            buy_votes+=1; reasons.append(f"{tf['tf']} RSI {tf['rsi']:.0f} تشبع بيع")
-            score+=1.5
-        if tf['rsi'] > 70:
-            sell_votes+=1; reasons.append(f"{tf['tf']} RSI {tf['rsi']:.0f} تشبع شراء")
-            score+=1.5
+        # 3. سحب سيولة لندن
+        sweep_high = london_high > asia_high + 2
+        sweep_low = london_low < asia_low - 2
 
-    # يومية
-    if prev_h and prev_l:
-        if price <= prev_l + 12:
-            buy_votes+=2; score+=2; reasons.append(f"عند قاع امبارح {prev_l:.0f} - شراء")
-        elif price >= prev_h - 12:
-            sell_votes+=2; score+=2; reasons.append(f"عند قمة امبارح {prev_h:.0f} - بيع")
-        elif price < prev_50:
-            buy_votes+=0.5; reasons.append("تحت 50% اليومية")
+        sweep_type = None
+        if sweep_high and london_df is not None and len(london_df)>0:
+            # هل رجع داخل رينج اسيا؟
+            last_close = float(get_series(london_df,'Close').iloc[-1])
+            if last_close < asia_high:
+                sweep_type = f"🔄 سحب قمة اسيا {asia_high:.0f} -> {london_high:.0f} ثم رجوع - تلاعب بيعي"
+        if sweep_low:
+            last_close = float(get_series(london_df,'Close').iloc[-1]) if len(london_df)>0 else price
+            if last_close > asia_low:
+                sweep_type = f"🔄 سحب قاع اسيا {asia_low:.0f} -> {london_low:.0f} ثم رجوع - تلاعب شرائي"
+
+        if not sweep_type:
+            sweep_type = f"⏳ لم يتم سحب سيولة بعد - قمة اسيا {asia_high:.0f} قاع {asia_low:.0f} | لندن H {london_high:.0f} L {london_low:.0f}"
+
+        # 4. دخول نيويورك - ORB + Order Block + FVG
+        ny_df = df.between_time("14:30","18:00").tail(100)
+        entry_signal = None
+        sl = tp1 = tp2 = None
+
+        if is_tight and sweep_type and "🔄" in sweep_type:
+            # دور على اوردر بلوك
+            # اوردر بلوك شرائي: اخر شمعة هابطة قبل 3 صاعدة قوية
+            for i in range(len(ny_df)-10, len(ny_df)-3):
+                try:
+                    # FVG صاعد: low[i+2] > high[i]
+                    if float(get_series(ny_df,'Low').iloc[i+2]) > float(get_series(ny_df,'High').iloc[i]):
+                        fvg_low = float(get_series(ny_df,'High').iloc[i])
+                        fvg_high = float(get_series(ny_df,'Low').iloc[i+2])
+                        # شمعة ابتلاع؟
+                        c1 = float(get_series(ny_df,'Close').iloc[i+2]); o1 = float(get_series(ny_df,'Open').iloc[i+2])
+                        c0 = float(get_series(ny_df,'Close').iloc[i+1]); o0 = float(get_series(ny_df,'Open').iloc[i+1])
+                        if c1 > o1 and c1 > o0: # ابتلاع شرائي
+                            if "شرائي" in sweep_type: # سحب قاع + ابتلاع شرائي = شراء قوي
+                                entry_signal = f"🟢 شراء قوي - Order Block + FVG {fvg_low:.0f}-{fvg_high:.0f} + ابتلاع"
+                                sl = fvg_low - 4
+                                tp1 = price + 18
+                                tp2 = price + 32
+                                break
+                except: pass
+
+            for i in range(len(ny_df)-10, len(ny_df)-3):
+                try:
+                    if float(get_series(ny_df,'High').iloc[i+2]) < float(get_series(ny_df,'Low').iloc[i]):
+                        fvg_high = float(get_series(ny_df,'Low').iloc[i])
+                        fvg_low = float(get_series(ny_df,'High').iloc[i+2])
+                        c1 = float(get_series(ny_df,'Close').iloc[i+2]); o1 = float(get_series(ny_df,'Open').iloc[i+2])
+                        c0 = float(get_series(ny_df,'Close').iloc[i+1]); o0 = float(get_series(ny_df,'Open').iloc[i+1])
+                        if c1 < o1 and c1 < o0:
+                            if "بيعي" in sweep_type:
+                                entry_signal = f"🔴 بيع قوي - Order Block + FVG {fvg_low:.0f}-{fvg_high:.0f} + ابتلاع"
+                                sl = fvg_high + 4
+                                tp1 = price - 18
+                                tp2 = price - 32
+                                break
+                except: pass
+
+        # رسم
+        fig,ax=plt.subplots(figsize=(13,6))
+        fig.patch.set_facecolor('#0a0a0a'); ax.set_facecolor('#0a0a0a')
+        pdf=df.tail(150)
+        c_=get_series(pdf,'Close'); o_=get_series(pdf,'Open'); h_=get_series(pdf,'High'); l_=get_series(pdf,'Low')
+        for i in range(len(pdf)):
+            o=float(o_.iloc[i]); h=float(h_.iloc[i]); l=float(l_.iloc[i]); c=float(c_.iloc[i])
+            col='#00ff7f' if c>=o else '#ff3b3b'
+            ax.plot([i,i],[l,h],color=col,lw=0.8)
+            from matplotlib.patches import Rectangle
+            ax.add_patch(Rectangle((i-0.35,min(o,c)),0.7,abs(c-o),fc=col,ec=col))
+
+        # خطوط اسيا
+        ax.axhline(asia_high,color='#ffaa00',ls='--',lw=1.2,alpha=0.8)
+        ax.axhline(asia_low,color='#00aaff',ls='--',lw=1.2,alpha=0.8)
+        ax.text(len(pdf)*0.02, asia_high, f'ASIA HIGH {asia_high:.0f}', color='#ffaa00', fontsize=8)
+        ax.text(len(pdf)*0.02, asia_low, f'ASIA LOW {asia_low:.0f}', color='#00aaff', fontsize=8)
+
+        ax.set_xlim(-1,len(pdf)); ax.set_xticks([])
+        for s in ax.spines.values(): s.set_visible(False)
+        plt.savefig('/tmp/chart.png',dpi=200,facecolor='#0a0a0a',bbox_inches='tight'); plt.close()
+
+        # بناء النص
+        txt = f"🧠 AMD SMART {now.strftime('%H:%M CET %d/%m')} | سعر {price:.1f}\n\n"
+        txt += f"1️⃣ اسيا (01-08): رينج {asia_range:.1f}$ - {asia_score}\n HIGH {asia_high:.1f} LOW {asia_low:.1f}\n\n"
+        txt += f"2️⃣ لندن (08-13:30): {sweep_type}\n\n"
+
+        if entry_signal and sl:
+            txt += f"3️⃣ نيويورك (14:30+): {entry_signal}\n"
+            txt += f"🚀 توصية ممتازة 8/10\n🎯 دخول {price:.1f}\n🛑 وقف {sl:.1f}\n✅ هدف1 {tp1:.1f} | هدف2 {tp2:.1f}\n"
+            score = 8
         else:
-            sell_votes+=0.5; reasons.append("فوق 50% اليومية")
+            if not is_tight:
+                txt += f"3️⃣ نيويورك: ⛔ لا تتداول - اسيا واسع\n"
+                score = 2
+            elif "⏳" in sweep_type:
+                txt += f"3️⃣ نيويورك: ⏳ انتظار سحب سيولة لندن\n"
+                score = 4
+            else:
+                txt += f"3️⃣ نيويورك: 🔍 تم السحب - انتظر FVG + ابتلاع للدخول\n"
+                score = 6
 
-    # ترند حقيقي اليوم
-    try:
-        dfd = yf.download("GC=F", period="5d", interval="1d", progress=False, auto_adjust=True, group_by='column').dropna()
-        change = (float(get_series(dfd,'Close').iloc[-1]) - float(get_series(dfd,'Close').iloc[-2]))/float(get_series(dfd,'Close').iloc[-2])*100
-        if change > 2: buy_votes+=2; score+=1.5; reasons.append(f"اليوم صاعد قوي +{change:.1f}%")
-        if change < -2: sell_votes+=2; score+=1.5; reasons.append(f"اليوم هابط قوي {change:.1f}%")
-    except:
-        change=0
+        return txt, '/tmp/chart.png', score
 
-    # قرار نهائي
-    total = buy_votes + sell_votes
-    if total==0: return None, None, 0
-
-    # نرسم شارت نظيف
-    df = tfs[1]['df'].tail(100) if len(tfs)>1 else tfs[0]['df'].tail(100)
-    fig,ax=plt.subplots(figsize=(12,6))
-    fig.patch.set_facecolor('#0a0a0a'); ax.set_facecolor('#0a0a0a')
-    c_=get_series(df,'Close'); o_=get_series(df,'Open'); h_=get_series(df,'High'); l_=get_series(df,'Low')
-    for i in range(len(df)):
-        o=float(o_.iloc[i]); h=float(h_.iloc[i]); l=float(l_.iloc[i]); c=float(c_.iloc[i])
-        col='#00ff7f' if c>=o else '#ff3b3b'
-        ax.plot([i,i],[l,h],color=col,lw=0.8)
-        ax.add_patch(mpatches.Rectangle((i-0.35,min(o,c)),0.7,abs(c-o),fc=col,ec=col))
-    if prev_h: ax.axhline(prev_h,color='#ffaa00',ls='--',lw=1,label=f'قمة {prev_h:.0f}')
-    if prev_l: ax.axhline(prev_l,color='#00aaff',ls='--',lw=1,label=f'قاع {prev_l:.0f}')
-    if prev_50: ax.axhline(prev_50,color='white',ls=':',lw=0.8)
-    ax.set_xlim(-1,len(df)); ax.set_xticks([])
-    for s in ax.spines.values(): s.set_visible(False)
-    plt.legend(loc='upper left', fontsize=8, facecolor='#1a1a1a', edgecolor='white', labelcolor='white')
-    plt.savefig('/tmp/chart.png',dpi=200,facecolor='#0a0a0a',bbox_inches='tight'); plt.close()
-
-    cet = pytz.timezone('Europe/Berlin')
-    now = datetime.now(cet).strftime('%H:%M CET %d/%m')
-
-    # بس اذا النقاط 7+ = توصية ممتازة
-    confluence = min(10, score)
-    if confluence < 6:
-        txt = f"🔍 {now}\n💰 {price:.2f} | نقاط {confluence:.1f}/10 - لا يوجد فرصة ممتازة\n\n"
-        for tf in tfs:
-            txt+=f"{tf['tf']}: {tf['bos']} RSI {tf['rsi']:.0f} | EMA9 {tf['ema9']:.0f} EMA21 {tf['ema21']:.0f}\n"
-        txt+=f"\nانتظار تلاقي اقوى..."
-        return txt, '/tmp/chart.png', confluence
-
-    if buy_votes > sell_votes:
-        sl = price - 15 if prev_l is None else min(price-8, prev_l-5)
-        tp1 = price + 20; tp2 = price + 35
-        txt = f"🚀🚀 توصية ممتازة {confluence:.1f}/10\n"
-        txt+=f"🟢 شراء قوي ✅ {now}\n💰 دخول {price:.1f}\n🛑 وقف {sl:.1f}\n✅ هدف1 {tp1:.1f} | هدف2 {tp2:.1f}\n\n"
-        txt+=f"📌 السبب ({len(reasons)} تلاقي):\n" + "\n".join([f"• {r}" for r in reasons[:5]]) + "\n\n"
-        for tf in tfs: txt+=f"{tf['tf']}: {tf['bos']} | "
-        return txt, '/tmp/chart.png', confluence
-    else:
-        sl = price + 15 if prev_h is None else max(price+8, prev_h+5)
-        tp1 = price - 20; tp2 = price - 35
-        txt = f"🚀🚀🚀 توصية ممتازة {confluence:.1f}/10\n"
-        txt+=f"🔴 بيع قوي ✅ {now}\n💰 دخول {price:.1f}\n🛑 وقف {sl:.1f}\n✅ هدف1 {tp1:.1f} | هدف2 {tp2:.1f}\n\n"
-        txt+=f"📌 السبب ({len(reasons)} تلاقي):\n" + "\n".join([f"• {r}" for r in reasons[:5]]) + "\n\n"
-        for tf in tfs: txt+=f"{tf['tf']}: {tf['bos']} | "
-        return txt, '/tmp/chart.png', confluence
+    except Exception as e:
+        return f"خطأ AMD {e}", None, 0
 
 @bot.message_handler(commands=['tawsiya','start'])
 def h(m):
     CHAT_IDS.add(m.chat.id)
     try:
-        bot.send_message(m.chat.id,"🧠 عم حلل كل الفريمات... 5د 15د 1س 4س يومي")
-        txt,p,score = build_ultra()
-        if txt and p:
+        bot.send_message(m.chat.id,"🧠 عم حلل AMD: اسيا + لندن + نيويورك...")
+        txt,p,score = get_amd_analysis()
+        if p:
             with open(p,'rb') as f: bot.send_photo(m.chat.id,f,caption=txt)
+        else:
+            bot.send_message(m.chat.id,txt)
     except Exception as e:
         bot.send_message(m.chat.id,f"خطأ {e}")
 
 @app.route('/')
-def home(): return "V31 ULTRA"
+def home(): return "V32 AMD SMART"
 
 def auto_check():
     global LAST_ALERT
     while True:
-        time.sleep(120) # يشيك كل دقيقتين
+        time.sleep(180)
         if not CHAT_IDS: continue
-        # بس اذا مر ساعة من اخر تنبيه
         if time.time() - LAST_ALERT < 3600: continue
         try:
-            txt,p,score = build_ultra()
-            if score >= 7: # بس يبعت اذا ممتازة 7+/10
+            txt,p,score = get_amd_analysis()
+            if score >= 7 and p:
                 LAST_ALERT = time.time()
                 for cid in list(CHAT_IDS):
                     try:
-                        with open(p,'rb') as f: bot.send_photo(cid,f,caption=f"🔔 تنبيه تلقائي\n{txt}")
+                        with open(p,'rb') as f: bot.send_photo(cid,f,caption=f"🔔 تنبيه AMD\n{txt}")
                     except: pass
         except: pass
 
