@@ -2,7 +2,7 @@ import os, requests, time
 from datetime import datetime
 import pytz
 TOKEN = "".join(os.getenv("BOT_TOKEN","").split())
-print(f"V29 EMA BUY-SELL BALANCED", flush=True)
+print(f"V30 SMART TREND FIX", flush=True)
 
 import telebot, yfinance as yf, pandas as pd, ta
 import matplotlib.pyplot as plt, matplotlib.patches as mpatches
@@ -46,6 +46,23 @@ def get_live_price():
             if isinstance(c,pd.DataFrame): c=c.iloc[:,0]
             return float(c.iloc[-1])
         except: return None
+
+def get_real_trend():
+    try:
+        dfd = yf.download("GC=F", period="5d", interval="1d", progress=False, auto_adjust=True, group_by='column').dropna()
+        if len(dfd)<2: return 0, "غير واضح"
+        close = get_series(dfd,'Close'); open_ = get_series(dfd,'Open')
+        today_c = float(close.iloc[-1]); today_o = float(open_.iloc[-1])
+        yest_c = float(close.iloc[-2])
+        change = (today_c - yest_c)/yest_c*100
+        if change > 1.0 and today_c > today_o:
+            return change, f"صاعد قوي +{change:.1f}% اليوم"
+        elif change < -1.0 and today_c < today_o:
+            return change, f"هابط قوي {change:.1f}% اليوم"
+        else:
+            return change, f"عرضي {change:+.1f}%"
+    except:
+        return 0, "غير واضح"
 
 def build_scalp():
     df = yf.download("GC=F", period="1d", interval="5m", progress=False, auto_adjust=True, group_by='column').dropna().tail(100)
@@ -95,7 +112,6 @@ def get_daily_candle_strategy():
         return txt
     except Exception as e: return f"📜 يومية: خطأ {e}"
 
-# ===== EMA 9/21 مصلحة تعطي بيع وشراء =====
 def get_ema_cross_strategy():
     try:
         df = yf.download("GC=F", period="5d", interval="5m", progress=False, auto_adjust=True, group_by='column').dropna().tail(300)
@@ -103,16 +119,13 @@ def get_ema_cross_strategy():
         ema9_s = ta.trend.EMAIndicator(close,9).ema_indicator()
         ema21_s = ta.trend.EMAIndicator(close,21).ema_indicator()
         e9 = float(ema9_s.iloc[-1]); e21 = float(ema21_s.iloc[-1])
-        e9_prev = float(ema9_s.iloc[-2]); e21_prev = float(ema21_s.iloc[-2])
         price = float(close.iloc[-1])
         live = get_live_price()
         if live: price = live
-
+        change, trend_txt = get_real_trend()
         swing_high = float(high.tail(100).max()); swing_low = float(low.tail(100).min())
         fib_50 = (swing_high + swing_low)/2
-
-        recent_low = float(low.tail(30).min())
-        recent_high = float(high.tail(30).max())
+        recent_low = float(low.tail(30).min()); recent_high = float(high.tail(30).max())
         lows = []; highs = []
         for i in range(20, len(df)-5):
             h = float(get_series(df,'High').iloc[i]); l = float(get_series(df,'Low').iloc[i])
@@ -121,29 +134,29 @@ def get_ema_cross_strategy():
         sup = max([x for x in lows if x < price], default=recent_low)
         res = min([x for x in highs if x > price], default=recent_high)
 
-        txt = f"📊 EMA9/21 (الفيديو الجديد):\n"
-        txt += f"ابيض EMA9 {e9:.1f} | ازرق EMA21 {e21:.1f} | سعر {price:.1f}\n"
-        txt += f"فيبو 50% {fib_50:.0f} | دعم {sup:.0f} | مقاومة {res:.0f}\n"
+        txt = f"📊 EMA9/21:\n"
+        txt += f"ابيض {e9:.0f} | ازرق {e21:.0f} | سعر {price:.0f} | {trend_txt}\n"
 
-        # المنطق الجديد المتوازن - السعر اهم من التقاطع
-        if price < e9 and price < e21:
-            # السعر تحت الاتنين = هبوط قوي - بيع
-            sl = res if res > price else e21 + 6
-            if abs(res - price) < 25:
-                txt += f"🔴 السعر تحت EMA9 و EMA21 - هبوط قوي ✅ بيع مباشر\n🎯 دخول {price:.1f} | 🛑 {sl:.1f} | ✅ {price - (sl-price)*1.5:.1f}\n💡 السبب: تحت الابيض والازرق + مقاومة {res:.0f} + خصم"
+        # فلتر ذكي: اذا السوق طالع +3% ما بنعطي بيع
+        if change > 1.5:
+            # يوم صاعد قوي - بس شراء
+            if price > sup:
+                sl = sup - 5
+                txt += f"🟢 يوم صاعد +{change:.1f}% ✅ شراء فقط اليوم\n🎯 دخول {price:.0f} | 🛑 {sl:.0f} | ✅ {price+(price-sl)*2:.0f}\n💡 السوق طالع بقوة - لا تبيع"
             else:
-                txt += f"🔴 السعر تحت EMA9 و EMA21 - هبوط قوي ✅ بيع مباشر\n🎯 دخول {price:.1f} | 🛑 {e21+5:.1f} | ✅ {price-18:.1f}\n💡 مقاومة قادمة {res:.0f}"
-        elif price > e9 and price > e21:
-            # السعر فوق الاتنين = صعود قوي - شراء
-            sl = sup if sup < price else e21 - 6
-            txt += f"🟢 السعر فوق EMA9 و EMA21 - صعود قوي ✅ شراء مباشر\n🎯 دخول {price:.1f} | 🛑 {sl:.1f} | ✅ {price + (price-sl)*1.5:.1f}\n💡 السبب: فوق الابيض والازرق + دعم {sup:.0f}"
+                txt += f"🟢 يوم صاعد +{change:.1f}% - انتظر شراء عند دعم {sup:.0f}"
+        elif change < -1.5:
+            # يوم هابط قوي - بس بيع
+            sl = res + 5
+            txt += f"🔴 يوم هابط {change:.1f}% ✅ بيع فقط اليوم\n🎯 دخول {price:.0f} | 🛑 {sl:.0f} | ✅ {price-(sl-price)*2:.0f}\n💡 السوق نازل بقوة - لا تشتري"
         else:
-            # السعر بين EMA9 و EMA21 = انتظار تقاطع
-            if e9 > e21:
-                txt += f"🟡 السعر بين EMA9 و EMA21 - ترند صاعد ضعيف\n⏳ انتظر اختراق فوق {e9:.0f} للشراء او كسر تحت {e21:.0f} للبيع\nدعم {sup:.0f} | مقاومة {res:.0f}"
+            # يوم عرضي - حسب EMA
+            if price < e9 and price < e21:
+                txt += f"🔴 تحت EMA9 و EMA21 - بيع ✅ {price:.0f} هدف {sup:.0f}"
+            elif price > e9 and price > e21:
+                txt += f"🟢 فوق EMA9 و EMA21 - شراء ✅ {price:.0f} هدف {res:.0f}"
             else:
-                txt += f"🟡 السعر بين EMA9 و EMA21 - ترند هابط ضعيف\n⏳ انتظر كسر تحت {e9:.0f} للبيع او اختراق فوق {e21:.0f} للشراء\nدعم {sup:.0f} | مقاومة {res:.0f}"
-
+                txt += f"🟡 بين المتوسطات - انتظار | دعم {sup:.0f} مقاومة {res:.0f}"
         return txt
     except Exception as e:
         return f"📊 EMA: خطأ {e}"
@@ -153,6 +166,7 @@ def build():
     df=yf.download("GC=F",period="5d",interval="15m",progress=False,auto_adjust=True,group_by='column').dropna().tail(300)
     close=get_series(df,'Close'); price=live if live else float(close.iloc[-1])
     ema20=float(ta.trend.EMAIndicator(close,20).ema_indicator().iloc[-1]); rsi=float(ta.momentum.RSIIndicator(close,14).rsi().iloc[-1])
+    change, trend_txt = get_real_trend()
     zones=find_zones(df); demands = [z for z in zones if z['type']=='DEMAND']; supplys = [z for z in zones if z['type']=='SUPPLY']
     best_demand = demands[-1] if demands else None; best_supply = supplys[-1] if supplys else None
     fig,ax=plt.subplots(figsize=(12,6)); fig.patch.set_facecolor('#0a0a0a'); ax.set_facecolor('#0a0a0a')
@@ -168,8 +182,12 @@ def build():
     plt.savefig('/tmp/chart.png',dpi=190,facecolor='#0a0a0a',bbox_inches='tight'); plt.close()
     scalp_txt, _, _, _, _ = build_scalp()
     cet = pytz.timezone('Europe/Berlin'); now_str = datetime.now(cet).strftime('%H:%M CET %d/%m')
-    txt = f"🚨 {now_str}\n💰 {price:.2f} (حي) | EMA20 {ema20:.0f} | RSI {rsi:.0f}\n\n"
-    if price < ema20 and rsi < 40: txt+=f"🔴 بيع مباشر هابط NOW ✅ {price:.1f} وقف {ema20+3:.1f} هدف {price-25:.1f}\n\n"
+    txt = f"🚨 {now_str}\n💰 {price:.2f} (حي) | EMA20 {ema20:.0f} | RSI {rsi:.0f} | {trend_txt}\n\n"
+    # فلتر ذكي للبيع المباشر - ما يعطي بيع اذا السوق طالع +3%
+    if price < ema20 and rsi < 40 and change < -1.0:
+        txt+=f"🔴 بيع مباشر هابط NOW ✅ {price:.1f} وقف {ema20+3:.1f} هدف {price-25:.1f}\n\n"
+    elif price < ema20 and change > 1.5:
+        txt+=f"🟢 السوق طالع +{change:.1f}% - الغاء اشارة البيع تحت EMA20 - انتظار شراء\n\n"
     if best_supply:
         e=(best_supply['low']+best_supply['high'])/2; sl=best_supply['high']+2.5; diff=e-price
         status="✅ ادخل هلا" if abs(diff)<5 else f"⏳ باقي {diff:.0f}$ ل {e:.0f}"
@@ -178,7 +196,7 @@ def build():
         e=(best_demand['low']+best_demand['high'])/2; sl=best_demand['low']-2.5; diff=e-price
         status="✅ ادخل هلا" if abs(diff)<5 else f"⏳ باقي {diff:.0f}$ ل {e:.0f}"
         txt+=f"🟢 شراء مؤسسي {status} DEMAND {best_demand['low']:.0f}-{best_demand['high']:.0f}\n🎯 {e:.1f} | 🛑 {sl:.1f}\n\n"
-    else: txt+=f"🟢 شراء: لا يوجد DEMAND\n\n"
+    else: txt+=f"🟢 شراء: لا يوجد DEMAND - لكن السوق صاعد +{change:.1f}% ✅ شراء\n\n"
     if scalp_txt: txt+=f"⚡ سكالب: {scalp_txt}\n\n"
     txt+= get_daily_candle_strategy() + "\n\n"
     txt+= get_ema_cross_strategy() + "\n\n"
@@ -191,13 +209,13 @@ def build():
 def h(m):
     CHAT_IDS.add(m.chat.id)
     try:
-        bot.send_message(m.chat.id,"⏳ عم حلل...")
+        bot.send_message(m.chat.id,"⏳ عم حلل السوق الحقيقي...")
         txt,p=build()
         with open(p,'rb') as f: bot.send_photo(m.chat.id,f,caption=txt)
     except Exception as e: bot.send_message(m.chat.id,f"خطأ {e}")
 
 @app.route('/')
-def home(): return "V29 FIXED"
+def home(): return "V30 SMART"
 
 def auto_check():
     while True:
