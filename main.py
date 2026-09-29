@@ -2,7 +2,7 @@ import os, requests, time
 from datetime import datetime
 import pytz
 TOKEN = "".join(os.getenv("BOT_TOKEN","").split())
-print(f"V30 SMART TREND FIX", flush=True)
+print(f"V31 ULTRA SMART", flush=True)
 
 import telebot, yfinance as yf, pandas as pd, ta
 import matplotlib.pyplot as plt, matplotlib.patches as mpatches
@@ -13,220 +13,191 @@ import threading
 app = Flask(__name__)
 bot = telebot.TeleBot(TOKEN)
 CHAT_IDS = set()
+LAST_ALERT = 0 # مشان ما يزعجك كل 5 دقايق
 
 def get_series(df,col):
     s=df[col]
     if isinstance(s,pd.DataFrame): s=s.iloc[:,0]
     return s.squeeze()
 
-def find_zones(df):
-    close=get_series(df,'Close'); open_=get_series(df,'Open'); high=get_series(df,'High'); low=get_series(df,'Low')
-    zones=[]
-    for i in range(30, len(df)-5):
-        if close.iloc[i-1] < open_.iloc[i-1]:
-            if all(close.iloc[i+j] > open_.iloc[i+j] for j in range(4)):
-                avg = np.mean([abs(close.iloc[i+j]-open_.iloc[i+j]) for j in range(4)])
-                if avg > 1.2 and high.iloc[i-1] < low.iloc[i+1]:
-                    zones.append({'type':'DEMAND','low':float(low.iloc[i-1]),'high':float(high.iloc[i-1]),'idx':i-1})
-        if close.iloc[i-1] > open_.iloc[i-1]:
-            if all(close.iloc[i+j] < open_.iloc[i+j] for j in range(4)):
-                avg = np.mean([abs(close.iloc[i+j]-open_.iloc[i+j]) for j in range(4)])
-                if avg > 1.2 and low.iloc[i-1] > high.iloc[i+1]:
-                    zones.append({'type':'SUPPLY','low':float(low.iloc[i-1]),'high':float(high.iloc[i-1]),'idx':i-1})
-    return zones[-6:]
-
 def get_live_price():
     try:
-        r=requests.get("https://api.gold-api.com/price/XAU",timeout=4).json()
+        r=requests.get("https://api.gold-api.com/price/XAU",timeout=3).json()
         return float(r['price'])
     except:
         try:
             df=yf.download("GC=F",period="1d",interval="1m",progress=False,auto_adjust=True).dropna()
-            c=df['Close']
-            if isinstance(c,pd.DataFrame): c=c.iloc[:,0]
+            c=get_series(df,'Close')
             return float(c.iloc[-1])
         except: return None
 
-def get_real_trend():
+def analyze_tf(tf_name, period, interval):
     try:
-        dfd = yf.download("GC=F", period="5d", interval="1d", progress=False, auto_adjust=True, group_by='column').dropna()
-        if len(dfd)<2: return 0, "غير واضح"
-        close = get_series(dfd,'Close'); open_ = get_series(dfd,'Open')
-        today_c = float(close.iloc[-1]); today_o = float(open_.iloc[-1])
-        yest_c = float(close.iloc[-2])
-        change = (today_c - yest_c)/yest_c*100
-        if change > 1.0 and today_c > today_o:
-            return change, f"صاعد قوي +{change:.1f}% اليوم"
-        elif change < -1.0 and today_c < today_o:
-            return change, f"هابط قوي {change:.1f}% اليوم"
-        else:
-            return change, f"عرضي {change:+.1f}%"
+        df = yf.download("GC=F", period=period, interval=interval, progress=False, auto_adjust=True, group_by='column').dropna().tail(200)
+        if len(df)<50: return None
+        close=get_series(df,'Close'); high=get_series(df,'High'); low=get_series(df,'Low')
+        price=float(close.iloc[-1])
+        ema9=float(ta.trend.EMAIndicator(close,9).ema_indicator().iloc[-1])
+        ema21=float(ta.trend.EMAIndicator(close,21).ema_indicator().iloc[-1])
+        rsi=float(ta.momentum.RSIIndicator(close,14).rsi().iloc[-1])
+        # BOS
+        rh=float(high.tail(50).max()); rl=float(low.tail(50).min())
+        if price > rh*0.998: bos="صاعد قوي"
+        elif price < rl*1.002: bos="هابط قوي"
+        elif ema9 > ema21 and price > ema9: bos="صاعد"
+        elif ema9 < ema21 and price < ema9: bos="هابط"
+        else: bos="عرضي"
+        return {"tf":tf_name, "price":price, "ema9":ema9, "ema21":ema21, "rsi":rsi, "bos":bos, "high":rh, "low":rl, "df":df}
     except:
-        return 0, "غير واضح"
+        return None
 
-def build_scalp():
-    df = yf.download("GC=F", period="1d", interval="5m", progress=False, auto_adjust=True, group_by='column').dropna().tail(100)
-    close=get_series(df,'Close'); high=get_series(df,'High'); low=get_series(df,'Low')
-    price=float(close.iloc[-1]); ema9=float(ta.trend.EMAIndicator(close,9).ema_indicator().iloc[-1]); ema21=float(ta.trend.EMAIndicator(close,21).ema_indicator().iloc[-1]); rsi=float(ta.momentum.RSIIndicator(close,14).rsi().iloc[-1]); atr=float(ta.volatility.AverageTrueRange(high,low,close,14).average_true_range().iloc[-1])
-    recent_low=float(low.tail(10).min()); recent_high=float(high.tail(10).max())
-    if price > ema9 > ema21 and 45 < rsi < 68 and price - recent_low < 4: return f"🟢 سكالب شراء دخول {price:.1f} وقف {recent_low-1:.1f} هدف {price+atr*1.8:.1f}", price, recent_low-1, price+atr*1.8, "BUY"
-    if price < ema9 < ema21 and 32 < rsi < 55 and recent_high - price < 4: return f"🔴 سكالب بيع دخول {price:.1f} وقف {recent_high+1:.1f} هدف {price-atr*1.8:.1f}", price, recent_high+1, price-atr*1.8, "SELL"
-    return None, None, None, None, None
-
-def get_time_cycle_analysis(df):
-    cet = pytz.timezone('Europe/Berlin'); now = datetime.now(cet); hour = now.hour
-    if 8 <= hour < 11: kz=f"🌟 لندن {now.strftime('%H:%M CET')}"
-    elif 14 <= hour < 17: kz=f"🌟 نيويورك {now.strftime('%H:%M CET')} - سيولة عالية"
-    else: kz=f"⏳ خارج الكيلزون {now.strftime('%H:%M CET')}"
-    try:
-        low_series = get_series(df,'Low'); bars = 200 - int(low_series.tail(200).argmin()); gann = bars % 90
-        gann_txt = f"Gann: {bars} شمعة - {gann}/90 {'⚠️ انعكاس' if gann>75 else f'باقي {90-gann}'}"
-    except: gann_txt = f"Gann: {now.strftime('%H:%M')}"
-    return f"📅 الزمني: {kz}\n⏰ {gann_txt}\n📆 {now.strftime('%A %d %B')}"
-
-def get_astro_analysis():
-    cet = pytz.timezone('Europe/Berlin'); now = datetime.now(cet)
-    known_new_moon = datetime(2024,1,11,tzinfo=pytz.UTC); days = (now.astimezone(pytz.UTC) - known_new_moon).days; lunar = days % 29.53
-    moon="🌕 بدر - ذروة - بيع" if 14<lunar<22 else "🌑 محاق" if lunar<7 else "🌓 تربيع"
-    return f"🔮 الفلكي: {moon}\n🪐 اليوم: {['شمس - ذهب قوي','قمر','مريخ','عطارد','مشتري','زهرة','زحل'][now.weekday()]}"
-
-def get_pro_technical(df, price, ema20, rsi):
-    high=get_series(df,'High'); low=get_series(df,'Low')
-    recent_high = float(high.tail(50).max()); recent_low = float(low.tail(50).min())
-    bos = "BOS هابط قوي" if price < recent_low*1.002 else "BOS صاعد" if price > recent_high*0.998 else "عرضي"
-    atr = float(ta.volatility.AverageTrueRange(high,low,get_series(df,'Close'),14).average_true_range().iloc[-1])
-    return f"📈 الفني: {bos} (H {recent_high:.0f} / L {recent_low:.0f}) | RSI {rsi:.0f} | ATR {atr:.1f}$"
-
-def get_daily_candle_strategy():
+def get_daily_levels():
     try:
         dfd = yf.download("GC=F", period="10d", interval="1d", progress=False, auto_adjust=True, group_by='column').dropna()
-        high = get_series(dfd,'High'); low = get_series(dfd,'Low')
-        prev_high = float(high.iloc[-2]); prev_low = float(low.iloc[-2]); prev_50 = (prev_high + prev_low) / 2
-        live = get_live_price()
-        price = live if live else float(get_series(dfd,'Close').iloc[-1])
-        txt = f"📜 اليومية: قمة {prev_high:.0f} | قاع {prev_low:.0f} | 50% {prev_50:.0f} | هلا {price:.0f}\n"
-        if price >= prev_high - 10: txt += f"🔴 عند القمة - بيع ✅ {price:.0f} هدف {prev_50:.0f} ثم {prev_low:.0f}"
-        elif price <= prev_low + 10: txt += f"🟢 عند القاع - شراء ✅ {price:.0f} هدف {prev_50:.0f} ثم {prev_high:.0f}"
-        elif price > prev_50: txt += f"🔴 فوق 50% - انتظار بيع عند {prev_high:.0f}"
-        else: txt += f"🟢 تحت 50% - انتظار شراء عند {prev_low:.0f}" if price>prev_low else f"🟢 تحت القاع - شراء وهمي ✅ {price:.0f} هدف {prev_50:.0f}"
-        return txt
-    except Exception as e: return f"📜 يومية: خطأ {e}"
+        high=get_series(dfd,'High'); low=get_series(dfd,'Low')
+        prev_h=float(high.iloc[-2]); prev_l=float(low.iloc[-2])
+        return prev_h, prev_l, (prev_h+prev_l)/2
+    except:
+        return None,None,None
 
-def get_ema_cross_strategy():
-    try:
-        df = yf.download("GC=F", period="5d", interval="5m", progress=False, auto_adjust=True, group_by='column').dropna().tail(300)
-        close=get_series(df,'Close'); high=get_series(df,'High'); low=get_series(df,'Low')
-        ema9_s = ta.trend.EMAIndicator(close,9).ema_indicator()
-        ema21_s = ta.trend.EMAIndicator(close,21).ema_indicator()
-        e9 = float(ema9_s.iloc[-1]); e21 = float(ema21_s.iloc[-1])
-        price = float(close.iloc[-1])
-        live = get_live_price()
-        if live: price = live
-        change, trend_txt = get_real_trend()
-        swing_high = float(high.tail(100).max()); swing_low = float(low.tail(100).min())
-        fib_50 = (swing_high + swing_low)/2
-        recent_low = float(low.tail(30).min()); recent_high = float(high.tail(30).max())
-        lows = []; highs = []
-        for i in range(20, len(df)-5):
-            h = float(get_series(df,'High').iloc[i]); l = float(get_series(df,'Low').iloc[i])
-            if h == float(get_series(df,'High').iloc[i-2:i+3].max()): highs.append(h)
-            if l == float(get_series(df,'Low').iloc[i-2:i+3].min()): lows.append(l)
-        sup = max([x for x in lows if x < price], default=recent_low)
-        res = min([x for x in highs if x > price], default=recent_high)
-
-        txt = f"📊 EMA9/21:\n"
-        txt += f"ابيض {e9:.0f} | ازرق {e21:.0f} | سعر {price:.0f} | {trend_txt}\n"
-
-        # فلتر ذكي: اذا السوق طالع +3% ما بنعطي بيع
-        if change > 1.5:
-            # يوم صاعد قوي - بس شراء
-            if price > sup:
-                sl = sup - 5
-                txt += f"🟢 يوم صاعد +{change:.1f}% ✅ شراء فقط اليوم\n🎯 دخول {price:.0f} | 🛑 {sl:.0f} | ✅ {price+(price-sl)*2:.0f}\n💡 السوق طالع بقوة - لا تبيع"
-            else:
-                txt += f"🟢 يوم صاعد +{change:.1f}% - انتظر شراء عند دعم {sup:.0f}"
-        elif change < -1.5:
-            # يوم هابط قوي - بس بيع
-            sl = res + 5
-            txt += f"🔴 يوم هابط {change:.1f}% ✅ بيع فقط اليوم\n🎯 دخول {price:.0f} | 🛑 {sl:.0f} | ✅ {price-(sl-price)*2:.0f}\n💡 السوق نازل بقوة - لا تشتري"
-        else:
-            # يوم عرضي - حسب EMA
-            if price < e9 and price < e21:
-                txt += f"🔴 تحت EMA9 و EMA21 - بيع ✅ {price:.0f} هدف {sup:.0f}"
-            elif price > e9 and price > e21:
-                txt += f"🟢 فوق EMA9 و EMA21 - شراء ✅ {price:.0f} هدف {res:.0f}"
-            else:
-                txt += f"🟡 بين المتوسطات - انتظار | دعم {sup:.0f} مقاومة {res:.0f}"
-        return txt
-    except Exception as e:
-        return f"📊 EMA: خطأ {e}"
-
-def build():
+def build_ultra():
     live=get_live_price()
-    df=yf.download("GC=F",period="5d",interval="15m",progress=False,auto_adjust=True,group_by='column').dropna().tail(300)
-    close=get_series(df,'Close'); price=live if live else float(close.iloc[-1])
-    ema20=float(ta.trend.EMAIndicator(close,20).ema_indicator().iloc[-1]); rsi=float(ta.momentum.RSIIndicator(close,14).rsi().iloc[-1])
-    change, trend_txt = get_real_trend()
-    zones=find_zones(df); demands = [z for z in zones if z['type']=='DEMAND']; supplys = [z for z in zones if z['type']=='SUPPLY']
-    best_demand = demands[-1] if demands else None; best_supply = supplys[-1] if supplys else None
-    fig,ax=plt.subplots(figsize=(12,6)); fig.patch.set_facecolor('#0a0a0a'); ax.set_facecolor('#0a0a0a')
-    pdf=df.tail(100); c_=get_series(pdf,'Close'); o_=get_series(pdf,'Open'); h_=get_series(pdf,'High'); l_=get_series(pdf,'Low')
-    for i in range(len(pdf)):
-        o=float(o_.iloc[i]); h=float(h_.iloc[i]); l=float(l_.iloc[i]); c=float(c_.iloc[i]); col='#00ff7f' if c>=o else '#ff3b3b'
-        ax.plot([i,i],[l,h],color=col,lw=0.8); ax.add_patch(mpatches.Rectangle((i-0.35,min(o,c)),0.7,abs(c-o),fc=col,ec=col))
-    for z in zones[-4:]: col='#00ff7f30' if z['type']=='DEMAND' else '#ff3b3b30'; ax.axhspan(z['low'],z['high'],color=col)
-    if best_supply: ax.axhline((best_supply['low']+best_supply['high'])/2,color='white',ls='--',lw=1.2)
-    if best_demand: ax.axhline((best_demand['low']+best_demand['high'])/2,color='white',ls='--',lw=1.2)
-    ax.set_xlim(-1,len(pdf)); ax.set_xticks([])
+    # نحلل كل الفريمات
+    tfs = [
+        analyze_tf("5د", "5d", "5m"),
+        analyze_tf("15د", "5d", "15m"),
+        analyze_tf("1س", "30d", "60m"),
+        analyze_tf("4س", "60d", "240m"),
+        analyze_tf("يومي", "30d", "1d"),
+    ]
+    tfs = [x for x in tfs if x]
+    if not tfs: return None, None, 0
+
+    price = live if live else tfs[1]['price'] if len(tfs)>1 else tfs[0]['price']
+    prev_h, prev_l, prev_50 = get_daily_levels()
+
+    # حساب نقاط التلاقي - Confluence Score
+    score = 0
+    reasons = []
+    buy_votes = 0
+    sell_votes = 0
+
+    for tf in tfs:
+        if "صاعد" in tf['bos']:
+            buy_votes+=1
+            score+=1 if tf['tf'] in ["1س","4س"] else 0.5
+        if "هابط" in tf['bos']:
+            sell_votes+=1
+            score+=1 if tf['tf'] in ["1س","4س"] else 0.5
+
+        # RSI
+        if tf['rsi'] < 30:
+            buy_votes+=1; reasons.append(f"{tf['tf']} RSI {tf['rsi']:.0f} تشبع بيع")
+            score+=1.5
+        if tf['rsi'] > 70:
+            sell_votes+=1; reasons.append(f"{tf['tf']} RSI {tf['rsi']:.0f} تشبع شراء")
+            score+=1.5
+
+    # يومية
+    if prev_h and prev_l:
+        if price <= prev_l + 12:
+            buy_votes+=2; score+=2; reasons.append(f"عند قاع امبارح {prev_l:.0f} - شراء")
+        elif price >= prev_h - 12:
+            sell_votes+=2; score+=2; reasons.append(f"عند قمة امبارح {prev_h:.0f} - بيع")
+        elif price < prev_50:
+            buy_votes+=0.5; reasons.append("تحت 50% اليومية")
+        else:
+            sell_votes+=0.5; reasons.append("فوق 50% اليومية")
+
+    # ترند حقيقي اليوم
+    try:
+        dfd = yf.download("GC=F", period="5d", interval="1d", progress=False, auto_adjust=True, group_by='column').dropna()
+        change = (float(get_series(dfd,'Close').iloc[-1]) - float(get_series(dfd,'Close').iloc[-2]))/float(get_series(dfd,'Close').iloc[-2])*100
+        if change > 2: buy_votes+=2; score+=1.5; reasons.append(f"اليوم صاعد قوي +{change:.1f}%")
+        if change < -2: sell_votes+=2; score+=1.5; reasons.append(f"اليوم هابط قوي {change:.1f}%")
+    except:
+        change=0
+
+    # قرار نهائي
+    total = buy_votes + sell_votes
+    if total==0: return None, None, 0
+
+    # نرسم شارت نظيف
+    df = tfs[1]['df'].tail(100) if len(tfs)>1 else tfs[0]['df'].tail(100)
+    fig,ax=plt.subplots(figsize=(12,6))
+    fig.patch.set_facecolor('#0a0a0a'); ax.set_facecolor('#0a0a0a')
+    c_=get_series(df,'Close'); o_=get_series(df,'Open'); h_=get_series(df,'High'); l_=get_series(df,'Low')
+    for i in range(len(df)):
+        o=float(o_.iloc[i]); h=float(h_.iloc[i]); l=float(l_.iloc[i]); c=float(c_.iloc[i])
+        col='#00ff7f' if c>=o else '#ff3b3b'
+        ax.plot([i,i],[l,h],color=col,lw=0.8)
+        ax.add_patch(mpatches.Rectangle((i-0.35,min(o,c)),0.7,abs(c-o),fc=col,ec=col))
+    if prev_h: ax.axhline(prev_h,color='#ffaa00',ls='--',lw=1,label=f'قمة {prev_h:.0f}')
+    if prev_l: ax.axhline(prev_l,color='#00aaff',ls='--',lw=1,label=f'قاع {prev_l:.0f}')
+    if prev_50: ax.axhline(prev_50,color='white',ls=':',lw=0.8)
+    ax.set_xlim(-1,len(df)); ax.set_xticks([])
     for s in ax.spines.values(): s.set_visible(False)
-    plt.savefig('/tmp/chart.png',dpi=190,facecolor='#0a0a0a',bbox_inches='tight'); plt.close()
-    scalp_txt, _, _, _, _ = build_scalp()
-    cet = pytz.timezone('Europe/Berlin'); now_str = datetime.now(cet).strftime('%H:%M CET %d/%m')
-    txt = f"🚨 {now_str}\n💰 {price:.2f} (حي) | EMA20 {ema20:.0f} | RSI {rsi:.0f} | {trend_txt}\n\n"
-    # فلتر ذكي للبيع المباشر - ما يعطي بيع اذا السوق طالع +3%
-    if price < ema20 and rsi < 40 and change < -1.0:
-        txt+=f"🔴 بيع مباشر هابط NOW ✅ {price:.1f} وقف {ema20+3:.1f} هدف {price-25:.1f}\n\n"
-    elif price < ema20 and change > 1.5:
-        txt+=f"🟢 السوق طالع +{change:.1f}% - الغاء اشارة البيع تحت EMA20 - انتظار شراء\n\n"
-    if best_supply:
-        e=(best_supply['low']+best_supply['high'])/2; sl=best_supply['high']+2.5; diff=e-price
-        status="✅ ادخل هلا" if abs(diff)<5 else f"⏳ باقي {diff:.0f}$ ل {e:.0f}"
-        txt+=f"🔴 بيع مؤسسي {status} SUPPLY {best_supply['low']:.0f}-{best_supply['high']:.0f}\n🎯 {e:.1f} | 🛑 {sl:.1f}\n\n"
-    if best_demand:
-        e=(best_demand['low']+best_demand['high'])/2; sl=best_demand['low']-2.5; diff=e-price
-        status="✅ ادخل هلا" if abs(diff)<5 else f"⏳ باقي {diff:.0f}$ ل {e:.0f}"
-        txt+=f"🟢 شراء مؤسسي {status} DEMAND {best_demand['low']:.0f}-{best_demand['high']:.0f}\n🎯 {e:.1f} | 🛑 {sl:.1f}\n\n"
-    else: txt+=f"🟢 شراء: لا يوجد DEMAND - لكن السوق صاعد +{change:.1f}% ✅ شراء\n\n"
-    if scalp_txt: txt+=f"⚡ سكالب: {scalp_txt}\n\n"
-    txt+= get_daily_candle_strategy() + "\n\n"
-    txt+= get_ema_cross_strategy() + "\n\n"
-    txt+= get_time_cycle_analysis(df) + "\n\n"
-    txt+= get_astro_analysis() + "\n\n"
-    txt+= get_pro_technical(df, price, ema20, rsi)
-    return txt,'/tmp/chart.png'
+    plt.legend(loc='upper left', fontsize=8, facecolor='#1a1a1a', edgecolor='white', labelcolor='white')
+    plt.savefig('/tmp/chart.png',dpi=200,facecolor='#0a0a0a',bbox_inches='tight'); plt.close()
+
+    cet = pytz.timezone('Europe/Berlin')
+    now = datetime.now(cet).strftime('%H:%M CET %d/%m')
+
+    # بس اذا النقاط 7+ = توصية ممتازة
+    confluence = min(10, score)
+    if confluence < 6:
+        txt = f"🔍 {now}\n💰 {price:.2f} | نقاط {confluence:.1f}/10 - لا يوجد فرصة ممتازة\n\n"
+        for tf in tfs:
+            txt+=f"{tf['tf']}: {tf['bos']} RSI {tf['rsi']:.0f} | EMA9 {tf['ema9']:.0f} EMA21 {tf['ema21']:.0f}\n"
+        txt+=f"\nانتظار تلاقي اقوى..."
+        return txt, '/tmp/chart.png', confluence
+
+    if buy_votes > sell_votes:
+        sl = price - 15 if prev_l is None else min(price-8, prev_l-5)
+        tp1 = price + 20; tp2 = price + 35
+        txt = f"🚀🚀 توصية ممتازة {confluence:.1f}/10\n"
+        txt+=f"🟢 شراء قوي ✅ {now}\n💰 دخول {price:.1f}\n🛑 وقف {sl:.1f}\n✅ هدف1 {tp1:.1f} | هدف2 {tp2:.1f}\n\n"
+        txt+=f"📌 السبب ({len(reasons)} تلاقي):\n" + "\n".join([f"• {r}" for r in reasons[:5]]) + "\n\n"
+        for tf in tfs: txt+=f"{tf['tf']}: {tf['bos']} | "
+        return txt, '/tmp/chart.png', confluence
+    else:
+        sl = price + 15 if prev_h is None else max(price+8, prev_h+5)
+        tp1 = price - 20; tp2 = price - 35
+        txt = f"🚀🚀🚀 توصية ممتازة {confluence:.1f}/10\n"
+        txt+=f"🔴 بيع قوي ✅ {now}\n💰 دخول {price:.1f}\n🛑 وقف {sl:.1f}\n✅ هدف1 {tp1:.1f} | هدف2 {tp2:.1f}\n\n"
+        txt+=f"📌 السبب ({len(reasons)} تلاقي):\n" + "\n".join([f"• {r}" for r in reasons[:5]]) + "\n\n"
+        for tf in tfs: txt+=f"{tf['tf']}: {tf['bos']} | "
+        return txt, '/tmp/chart.png', confluence
 
 @bot.message_handler(commands=['tawsiya','start'])
 def h(m):
     CHAT_IDS.add(m.chat.id)
     try:
-        bot.send_message(m.chat.id,"⏳ عم حلل السوق الحقيقي...")
-        txt,p=build()
-        with open(p,'rb') as f: bot.send_photo(m.chat.id,f,caption=txt)
-    except Exception as e: bot.send_message(m.chat.id,f"خطأ {e}")
+        bot.send_message(m.chat.id,"🧠 عم حلل كل الفريمات... 5د 15د 1س 4س يومي")
+        txt,p,score = build_ultra()
+        if txt and p:
+            with open(p,'rb') as f: bot.send_photo(m.chat.id,f,caption=txt)
+    except Exception as e:
+        bot.send_message(m.chat.id,f"خطأ {e}")
 
 @app.route('/')
-def home(): return "V30 SMART"
+def home(): return "V31 ULTRA"
 
 def auto_check():
+    global LAST_ALERT
     while True:
-        time.sleep(300)
+        time.sleep(120) # يشيك كل دقيقتين
         if not CHAT_IDS: continue
+        # بس اذا مر ساعة من اخر تنبيه
+        if time.time() - LAST_ALERT < 3600: continue
         try:
-            txt,p = build()
-            for cid in list(CHAT_IDS):
-                try:
-                    with open(p,'rb') as f: bot.send_photo(cid,f,caption=txt)
-                except: pass
+            txt,p,score = build_ultra()
+            if score >= 7: # بس يبعت اذا ممتازة 7+/10
+                LAST_ALERT = time.time()
+                for cid in list(CHAT_IDS):
+                    try:
+                        with open(p,'rb') as f: bot.send_photo(cid,f,caption=f"🔔 تنبيه تلقائي\n{txt}")
+                    except: pass
         except: pass
 
 def run():
