@@ -2,7 +2,7 @@ import os, requests, time, numpy as np
 from datetime import datetime, timedelta
 import pytz
 TOKEN = "".join(os.getenv("BOT_TOKEN","").split())
-print(f"V38 FIXED VP+FLOW", flush=True)
+print(f"V39 FINAL VP+FLOW FIXED", flush=True)
 
 import telebot, yfinance as yf, pandas as pd, ta
 import matplotlib.pyplot as plt
@@ -32,54 +32,45 @@ def get_live_price():
 
 def get_volume_profile(df, bins=30):
     try:
-        close=get_series(df,'Close'); high=get_series(df,'High'); low=get_series(df,'Low')
-        # اذا مافي فوليوم نستخدم 1 لكل شمعة
-        if 'Volume' in df.columns:
-            vol=get_series(df,'Volume')
-            if vol.sum()==0 or vol.isna().all(): vol=pd.Series([1]*len(df), index=df.index)
-        else: vol=pd.Series([1]*len(df), index=df.index)
-        vol = vol.fillna(1)
+        close=get_series(df,'Close'); low=get_series(df,'Low'); high=get_series(df,'High')
         p_min = float(low.min()); p_max = float(high.max())
-        if p_max==p_min: return None,None,None,None,None
-        hist, edges = np.histogram(close, bins=bins, range=(p_min, p_max), weights=vol)
-        if hist.sum()==0: return None,None,None,None,None
+        if p_max - p_min < 1: return None,None,None,None,None
+        hist, edges = np.histogram(close, bins=bins, range=(p_min, p_max))
+        if hist.sum() == 0: return None,None,None,None,None
         poc_idx = int(np.argmax(hist)); poc = (edges[poc_idx] + edges[poc_idx+1])/2
-        total = hist.sum(); sorted_idx = np.argsort(hist)[::-1]
-        cum=0; va=[]
-        for idx in sorted_idx:
-            cum+=hist[idx]; va.append(idx)
-            if cum >= total*0.7: break
-        if not va: return poc,poc,poc,edges,hist
-        va_prices = [(edges[i]+edges[i+1])/2 for i in va]
+        total = hist.sum(); order = np.argsort(hist)[::-1]
+        cum=0; va_idx=[]
+        for i in order:
+            cum+=hist[i]; va_idx.append(i)
+            if cum >= total*0.70: break
+        va_prices = [(edges[i]+edges[i+1])/2 for i in va_idx]
         return poc, max(va_prices), min(va_prices), edges, hist
     except Exception as e:
-        print(f"VP error {e}")
+        print(f"VP err {e}")
         return None,None,None,None,None
 
 def get_order_flow(df):
     try:
         close=get_series(df,'Close'); open_=get_series(df,'Open')
         high=get_series(df,'High'); low=get_series(df,'Low')
-        if 'Volume' in df.columns:
-            vol=get_series(df,'Volume')
-            if vol.sum()==0 or vol.isna().all(): vol=pd.Series([1000]*len(df), index=df.index)
-        else: vol=pd.Series([1000]*len(df), index=df.index)
-        vol=vol.fillna(1000)
-        buy_vol = vol.where(close>=open_, 0); sell_vol = vol.where(close<open_, 0)
-        delta = float(buy_vol.tail(20).sum() - sell_vol.tail(20).sum())
-        d5 = float(buy_vol.tail(5).sum() - sell_vol.tail(5).sum())
-        cvd = float((buy_vol - sell_vol).cumsum().iloc[-1])
-        recent_range = float((high.tail(5).max() - low.tail(5).min()))
-        recent_vol = float(vol.tail(5).sum())
-        avg_vol = float(vol.tail(20).mean()) if len(vol)>=20 else recent_vol
-        absorption = recent_vol > avg_vol*1.5 and recent_range < 8
-        if d5 > 200: flow_sig = "🟢 شراء مسيطر"
-        elif d5 < -200: flow_sig = "🔴 بيع مسيطر"
-        elif delta > 0: flow_sig = "🟢 ميول شرائي"
-        elif delta < 0: flow_sig = "🔴 ميول بيعي"
-        else: flow_sig = "محايد"
-        return delta, d5, flow_sig, absorption, cvd
-    except: return 0,0,"محايد",False,0
+        green = (close >= open_).sum()
+        red = (close < open_).sum()
+        green5 = (close.tail(5) >= open_.tail(5)).sum()
+        red5 = (close.tail(5) < open_.tail(5)).sum()
+        delta = int(green - red)
+        d5 = int(green5 - red5)
+        flow = (close >= open_).astype(int) - (close < open_).astype(int)
+        cvd = int(flow.cumsum().iloc[-1])
+        if d5 >= 3: sig = "🟢 شراء مسيطر"
+        elif d5 <= -3: sig = "🔴 بيع مسيطر"
+        elif delta > 0: sig = "🟢 ميول شرائي"
+        elif delta < 0: sig = "🔴 ميول بيعي"
+        else: sig = "محايد"
+        recent_range = float(high.tail(5).max() - low.tail(5).min())
+        absorp = recent_range < 5
+        return delta, d5, sig, absorp, cvd
+    except:
+        return 0,0,"محايد",False,0
 
 def get_amd_analysis():
     try:
@@ -95,9 +86,7 @@ def get_amd_analysis():
         yest_asia = df[df.index.date == yest].between_time("01:00","07:59")
         asia_df = today_asia if len(today_asia)>=10 and now.hour>=8 else yest_asia if len(yest_asia)>=10 else df.between_time("01:00","07:59").tail(80)
         asia_high = float(get_series(asia_df,'High').max()); asia_low = float(get_series(asia_df,'Low').min())
-        asia_range = asia_high - asia_low
-        # صار 35 مو 28 عشان 31 يعتبر ضيق
-        is_tight = asia_range <= 35
+        asia_range = asia_high - asia_low; is_tight = asia_range <= 35
         london_df = df[df.index.date == today].between_time("08:00","13:30") if now.hour>=8 else df[df.index.date == yest].between_time("08:00","13:30")
         london_high = float(get_series(london_df,'High').max()) if len(london_df)>0 else price
         london_low = float(get_series(london_df,'Low').min()) if len(london_df)>0 else price
@@ -116,7 +105,7 @@ def get_amd_analysis():
         ax.set_xlim(-1,len(pdf)); ax.set_xticks([])
         for s in ax.spines.values(): s.set_visible(False)
         plt.savefig('/tmp/chart.png',dpi=200,facecolor='#0a0a0a',bbox_inches='tight'); plt.close()
-        if not is_tight: txt=f"⛔ لا تفوت هلا\nالسبب: اسيا واسع {asia_range:.1f}$\nسعر {price:.1f}\nنصيحة: بكرا 08:30 جرب"; score=2
+        if not is_tight: txt=f"⛔ لا تفوت هلا\nالسبب: اسيا واسع {asia_range:.1f}$\nسعر {price:.1f}"; score=2
         elif not sweep: txt=f"⛔ لا تفوت - انتظار\nاسيا ضيق {asia_range:.1f}$ ✅\nسعر {price:.1f}"; score=5
         else:
             if is_buy: txt=f"🟢 فوت شراء هلا\n🎯 {price:.1f}\n🛑 {asia_low-4:.1f}\n✅ {price+18:.1f}/{price+35:.1f}\nالسبب: {sweep}"; score=8
@@ -132,7 +121,7 @@ def h(m):
     if p:
         with open(p,'rb') as f: bot.send_photo(m.chat.id,f,caption=txt)
     else: bot.send_message(m.chat.id,txt)
-    bot.send_message(m.chat.id,"✅ بالخلفية + /vp + /flow شغالين")
+    bot.send_message(m.chat.id,"✅ بالخلفية + /vp + /flow")
 
 @bot.message_handler(commands=['scalp'])
 def sc(m):
@@ -174,7 +163,7 @@ def vp_cmd(m):
         price=get_live_price() or float(get_series(df,'Close').iloc[-1])
         poc,vah,val,edges,hist = get_volume_profile(df)
         if poc is None:
-            bot.send_message(m.chat.id,f"📊 VP ما في داتا كافية هلا سعر {price:.1f} جرب بعد شوي"); return
+            bot.send_message(m.chat.id,f"ما في داتا POC سعر {price:.1f}"); return
         fig, (ax1, ax2) = plt.subplots(1,2, figsize=(14,6), gridspec_kw={'width_ratios':[3,1]})
         fig.patch.set_facecolor('#0a0a0a'); ax1.set_facecolor('#0a0a0a'); ax2.set_facecolor('#0a0a0a')
         pdf=df.tail(80)
@@ -184,13 +173,12 @@ def vp_cmd(m):
         ax1.axhline(poc,color='white',lw=2); ax1.axhline(vah,color='magenta',ls='--'); ax1.axhline(val,color='magenta',ls='--')
         ax1.set_title(f"POC {poc:.0f}", color='white'); ax1.set_xticks([])
         ax2.barh((edges[:-1]+edges[1:])/2, hist, height=(edges[1]-edges[0])*0.8, color='cyan', alpha=0.6)
-        ax2.axhline(poc,color='white',lw=2); ax2.axhline(vah,color='magenta',ls='--'); ax2.axhline(val,color='magenta',ls='--')
+        ax2.axhline(poc,color='white',lw=2)
         for s in ax1.spines.values(): s.set_visible(False)
         for s in ax2.spines.values(): s.set_visible(False)
         plt.savefig('/tmp/vp.png',dpi=200,facecolor='#0a0a0a',bbox_inches='tight'); plt.close()
-        # توصية
-        if price > vah: rec="🔴 فوق القيمة - فوت بيع يرجع ل VAH"
-        elif price < val: rec="🟢 تحت القيمة - فوت شراء يرجع ل VAL"
+        if price > vah: rec="🔴 فوق القيمة - فوت بيع"
+        elif price < val: rec="🟢 تحت القيمة - فوت شراء"
         elif price > poc: rec=f"🟢 فوق POC - فوت شراء هدف {vah:.0f}"
         else: rec=f"🔴 تحت POC - فوت بيع هدف {val:.0f}"
         txt=f"📊 Volume Profile\nPOC {poc:.1f} VAH {vah:.1f} VAL {val:.1f}\nسعر {price:.1f}\n\n{rec}"
@@ -204,13 +192,12 @@ def flow_cmd(m):
         df=yf.download("GC=F",period="1d",interval="5m",progress=False,auto_adjust=True,group_by='column').dropna().tail(150)
         price=get_live_price() or float(get_series(df,'Close').iloc[-1])
         delta,d5,flow_sig,absorp,cvd = get_order_flow(df)
-        txt=f"📊 Order Flow\nسعر {price:.1f}\n{flow_sig}\nΔ20 {delta:.0f} Δ5 {d5:.0f} CVD {cvd:.0f}\n"
-        if absorp:
-            txt+=f"⛔ لا تفوت - امتصاص\nفوليوم عالي بدون حركة"
+        txt=f"📊 Order Flow\nسعر {price:.1f}\n{flow_sig}\nΔ20 {delta} Δ5 {d5} CVD {cvd}\n"
+        if absorp: txt+="⛔ امتصاص - لا تفوت"
         else:
-            if "شراء مسيطر" in flow_sig: txt+=f"🟢 فوت شراء - مشترين قوة"
-            elif "بيع مسيطر" in flow_sig: txt+=f"🔴 فوت بيع - بايعين قوة"
-            else: txt+=f"⚠️ انتظار - محايد"
+            if "شراء مسيطر" in flow_sig: txt+=f"🟢 فوت شراء - قوة شرائية"
+            elif "بيع مسيطر" in flow_sig: txt+=f"🔴 فوت بيع - قوة بيعية"
+            else: txt+="⚠️ انتظار - محايد"
         bot.send_message(m.chat.id,txt)
     except Exception as e: bot.send_message(m.chat.id,f"خطأ {e}")
 
@@ -223,7 +210,7 @@ def any_msg(m):
     else: bot.send_message(m.chat.id,txt)
 
 @app.route('/')
-def home(): return "V38 FIXED"
+def home(): return "V39 FIXED FINAL"
 
 def auto_checker():
     global LAST_ALERT
