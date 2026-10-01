@@ -2,7 +2,7 @@ import os, requests, time, numpy as np
 from datetime import datetime
 import pytz
 TOKEN = "".join(os.getenv("BOT_TOKEN","").split())
-print("V50 FIX FALSE ALERT", flush=True)
+print("V52 XAU ONLY FIX", flush=True)
 
 import telebot, yfinance as yf
 import matplotlib.pyplot as plt
@@ -62,7 +62,7 @@ def detect_engulfing(df):
     try:
         o=safe_vals(df,'Open'); c=safe_vals(df,'Close')
         if len(o)<4: return "لا يوجد ابتلاع", False
-        # نفحص الشمعتين المسكرات قبل الحالية - الحالية لسه حية وبتخدع
+        # FIX 20:07 - نفحص الشمعتين المسكرات فقط
         o1,c1=o[-3],c[-3]
         o2,c2=o[-2],c[-2]
         body1=abs(c1-o1); body2=abs(c2-o2)
@@ -90,10 +90,9 @@ def check_signal():
         if dist_poc<8: can_trade=False; reason.append(f"قريب POC {dist_poc:.1f}")
         if abs(d5)<2 and abs(d)<2: can_trade=False; reason.append("Flow ضعيف")
         if not eng_ok: can_trade=False; reason.append("ما في ابتلاع")
-        # فلتر التناقض يلي سبب تنبيه 20:07 الكاذب
         if eng_ok:
-            if "بيع" in eng_text and d5>0: can_trade=False; reason.append("تناقض: ابتلاع بيعي + فلو شرائي")
-            if "شراء" in eng_text and d5<0: can_trade=False; reason.append("تناقض: ابتلاع شرائي + فلو بيعي")
+            if "بيع" in eng_text and d5>0: can_trade=False; reason.append("تناقض: ابتلاع بيعي + فلو شرائي ⛔")
+            if "شراء" in eng_text and d5<0: can_trade=False; reason.append("تناقض: ابتلاع شرائي + فلو بيعي ⛔")
         return {"price":price,"poc":poc,"asia_rng":asia_rng,"asia_status":asia_status,"d":d,"d5":d5,"sig":sig,"eng_text":eng_text,"eng_ok":eng_ok,"can_trade":can_trade,"dist":dist_poc,"df":df.tail(60),"reason":reason}
     except Exception as e:
         print(f"check err {e}"); return None
@@ -148,13 +147,13 @@ def auto_watcher():
             for chat_id in list(AUTO_CHATS):
                 if now-LAST_ALERT.get(chat_id,0) < 1200: continue
                 price=data["price"]; poc=data["poc"]; eng_text=data["eng_text"]; d=data["d"]; d5=data["d5"]; sig=data["sig"]; asia_rng=data["asia_rng"]; asia_status=data["asia_status"]
-                txt=f"🚨 تنبيه تلقائي مؤكد 🚨\n{eng_text} ✅\n🎯 دخول {price:.1f} 🛑 {price+15:.1f if 'بيع' in eng_text else price-15:.1f}\n📊 POC {poc:.0f} | اسيا {asia_status}\n{sig} Δ20 {d} Δ5 {d5}\nارسل /tawsiya للشارت"
+                txt=f"🚨 تنبيه تلقائي مؤكد 🚨\n{eng_text} ✅\n🎯 دخول {price:.1f}\n📊 POC {poc:.0f} | اسيا {asia_status}\n{sig} Δ20 {d} Δ5 {d5}\nارسل /tawsiya للشارت"
                 try: bot.send_message(chat_id, txt); LAST_ALERT[chat_id]=now
                 except: pass
         except Exception as e: print(f"watcher {e}"); time.sleep(10)
 
 @app.route('/')
-def home(): return "V50 FIX OK"
+def home(): return "V52 FIX OK"
 
 def run_bot():
     while True:
