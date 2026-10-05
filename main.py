@@ -2,7 +2,7 @@ import os, requests, time, numpy as np
 from datetime import datetime
 import pytz
 TOKEN = "".join(os.getenv("BOT_TOKEN","").split())
-print("V54 RESISTANCE 4186 ALERT", flush=True)
+print("V53 VIP VIDEO+XAU", flush=True)
 
 import telebot, yfinance as yf
 import matplotlib.pyplot as plt
@@ -15,13 +15,12 @@ bot = telebot.TeleBot(TOKEN)
 
 AUTO_CHATS = set()
 LAST_ALERT = {}
-RESISTANCE_4186 = 4186.5
 
 def get_price():
     try:
         r=requests.get("https://api.gold-api.com/price/XAU",timeout=3).json()
         return float(r['price'])
-    except: return 4186.0
+    except: return 4153.0
 
 def safe_vals(df, col):
     v = df[col].values
@@ -46,7 +45,7 @@ def get_vp(df):
     lo=float(np.min(safe_vals(df,'Low'))); hi=float(np.max(safe_vals(df,'High')))
     hist,edges=np.histogram(c,bins=25,range=(lo,hi))
     poc=float((edges[np.argmax(hist)]+edges[np.argmax(hist)+1])/2)
-    return poc
+    return poc,0,0,None,None
 
 def get_flow(df, poc, price):
     c = safe_vals(df,'Close')
@@ -74,17 +73,39 @@ def detect_engulfing(df):
         return "لا يوجد ابتلاع", False
     except: return "لا يوجد", False
 
+# === جديد: استراتيجية الفيديو للذهب ===
+def get_h1_levels():
+    try:
+        df_h1 = yf.download("GC=F", period="5d", interval="1h", progress=False, auto_adjust=True).dropna()
+        if len(df_h1)<20: return None, None
+        h1_high = float(np.max(safe_vals(df_h1.tail(50),'High')))
+        h1_low = float(np.min(safe_vals(df_h1.tail(50),'Low')))
+        return h1_high, h1_low
+    except: return None, None
+
+def detect_quad_top_bottom(df_m5):
+    try:
+        highs = safe_vals(df_m5.tail(20),'High')
+        lows = safe_vals(df_m5.tail(20),'Low')
+        max_h = np.max(highs)
+        min_l = np.min(lows)
+        quad_top = np.sum(highs >= max_h*0.999) >= 3
+        quad_bottom = np.sum(lows <= min_l*1.001) >= 3
+        return quad_top, quad_bottom, max_h, min_l
+    except: return False, False, 0, 0
+
 def check_signal():
     try:
         df=yf.download("GC=F",period="3d",interval="5m",progress=False,auto_adjust=True).dropna()
         if len(df)<30: return None
         price=get_price()
         asia_rng, asia_status = get_asia_range(df)
-        poc=get_vp(df.tail(120))
+        poc,_,_,_,_=get_vp(df.tail(120))
         d,d5,sig=get_flow(df.tail(60),poc,price)
         eng_text, eng_ok = detect_engulfing(df.tail(20))
+        h1_high, h1_low = get_h1_levels()
+        quad_top, quad_bottom, _, _ = detect_quad_top_bottom(df.tail(30))
         dist_poc = abs(price-poc)
-        dist_res = abs(price-RESISTANCE_4186)
         can_trade = True
         reason=[]
         if asia_rng>35: can_trade=False; reason.append(f"اسيا واسع {asia_rng:.1f}")
@@ -94,17 +115,22 @@ def check_signal():
         if eng_ok:
             if "بيع" in eng_text and d5>0: can_trade=False; reason.append("تناقض بيع+شراء")
             if "شراء" in eng_text and d5<0: can_trade=False; reason.append("تناقض شراء+بيع")
-        # VIP 4186
-        is_4186_setup = (dist_res < 8) and eng_ok and "بيع" in eng_text and d5<0
-        video_bonus = "💎 مقاومة 4186 + ابتلاع VIP" if is_4186_setup else ""
-        return {"price":price,"poc":poc,"asia_rng":asia_rng,"asia_status":asia_status,"d":d,"d5":d5,"sig":sig,"eng_text":eng_text,"eng_ok":eng_ok,"can_trade":can_trade,"dist":dist_poc,"df":df.tail(60),"reason":reason,"dist_res":dist_res,"is_4186":is_4186_setup,"video_bonus":video_bonus}
+        # فلتر الفيديو الاضافي
+        near_h1_res = h1_high and abs(price-h1_high) < 12
+        near_h1_sup = h1_low and abs(price-h1_low) < 12
+        video_bonus = ""
+        if eng_ok and "بيع" in eng_text and quad_top and near_h1_res:
+            video_bonus = "💎 قمة رباعية + مقاومة H1 ✅"
+        elif eng_ok and "شراء" in eng_text and quad_bottom and near_h1_sup:
+            video_bonus = "💎 قاع رباعي + دعم H1 ✅"
+        return {"price":price,"poc":poc,"asia_rng":asia_rng,"asia_status":asia_status,"d":d,"d5":d5,"sig":sig,"eng_text":eng_text,"eng_ok":eng_ok,"can_trade":can_trade,"dist":dist_poc,"df":df.tail(60),"reason":reason,"h1_high":h1_high,"h1_low":h1_low,"quad_top":quad_top,"quad_bottom":quad_bottom,"video_bonus":video_bonus}
     except Exception as e:
         print(f"check err {e}"); return None
 
 @bot.message_handler(commands=['auto_on','راقب'])
 def auto_on(m):
     AUTO_CHATS.add(m.chat.id); LAST_ALERT[m.chat.id]=0
-    bot.send_message(m.chat.id,f"✅ V54 شغال - تنبيه خاص مقاومة {RESISTANCE_4186}\nرح نبهك بس عند ابتلاع بيعي على 4186\nلإيقاف /auto_off")
+    bot.send_message(m.chat.id,"✅ V53 VIP شغال - ذهب + قمة رباعية\nما ببعت الا اذا ابتلاع مؤكد + فلو متطابق\nلإيقاف /auto_off")
 
 @bot.message_handler(commands=['auto_off','وقف'])
 def auto_off(m):
@@ -119,47 +145,49 @@ def tawsiya(m):
         if not data: bot.send_message(m.chat.id,"خطأ بيانات"); return
         price=data["price"]; poc=data["poc"]; asia_rng=data["asia_rng"]; asia_status=data["asia_status"]
         d=data["d"]; d5=data["d5"]; sig=data["sig"]; eng_text=data["eng_text"]; eng_ok=data["eng_ok"]; can_trade=data["can_trade"]
-        reason=data["reason"]; dft=data["df"]; dist_res=data["dist_res"]; is_4186=data["is_4186"]; video_bonus=data["video_bonus"]
+        reason=data["reason"]; dft=data["df"]; h1_high=data["h1_high"]; h1_low=data["h1_low"]; quad_top=data["quad_top"]; quad_bottom=data["quad_bottom"]; video_bonus=data["video_bonus"]
         fig,ax=plt.subplots(figsize=(12,5)); fig.patch.set_facecolor('#0e0e0e'); ax.set_facecolor('#0e0e0e')
         o=safe_vals(dft,'Open'); h=safe_vals(dft,'High'); l=safe_vals(dft,'Low'); cl=safe_vals(dft,'Close')
         for i in range(len(dft)):
             col='#00ff88' if cl[i]>=o[i] else '#ff4444'
             ax.plot([i,i],[l[i],h[i]],color=col,lw=1); ax.add_patch(Rectangle((i-0.35,min(o[i],cl[i])),0.7,abs(cl[i]-o[i]),fc=col,ec=col))
         ax.axhline(poc,color='white',ls='--',lw=1)
-        ax.axhline(RESISTANCE_4186,color='red',ls='-',lw=1.5)
+        if h1_high: ax.axhline(h1_high,color='red',ls=':',lw=1)
+        if h1_low: ax.axhline(h1_low,color='green',ls=':',lw=1)
         if eng_ok: ax.add_patch(Rectangle((len(dft)-2-0.4, min(l[-2],l[-1])-2), 2.8, (max(h[-2],h[-1])-min(l[-2],l[-1])+4), fill=False, ec='yellow', lw=2, ls='--'))
         ax.set_xlim(-1,len(dft)); ax.set_xticks([]);
         for s in ax.spines.values(): s.set_visible(False)
         plt.savefig('/tmp/c.png',dpi=200,facecolor='#0e0e0e',bbox_inches='tight'); plt.close()
-        res_info = f"مقاومة {RESISTANCE_4186} بعيد {dist_res:.1f}$"
-        if is_4186:
-            txt=f"🚨 VIP 4186 - فوت بيع مؤكد ✅\n{eng_text}\n{video_bonus}\n🎯 {price:.1f} 🛑 {price+12:.1f} ✅ {price-18:.1f}/{price-35:.1f}\n{res_info}\n{sig} Δ20 {d} Δ5 {d5}"
-        elif not can_trade:
-            txt=f"⛔ لا تفوت - {eng_text}\n❌ {', '.join(reason)}\n{res_info}\n📊 اسيا {asia_status} {asia_rng:.1f}$ | POC {poc:.0f}\n{sig} Δ20 {d} Δ5 {d5}"
+        quad_info = f"قمة رباعية {'✅' if quad_top else '❌'} | قاع رباعي {'✅' if quad_bottom else '❌'}"
+        h1_info = f"H1 مقاومة {h1_high:.1f} دعم {h1_low:.1f}" if h1_high else ""
+        if not can_trade:
+            txt=f"⛔ لا تفوت - {eng_text}\n❌ {', '.join(reason)}\n{quad_info}\n{h1_info}\n📊 اسيا {asia_status} {asia_rng:.1f}$ | POC {poc:.0f}\n{sig} Δ20 {d} Δ5 {d5}"
         else:
-            txt=f"🚨 فوت بيع - ابتلاع مؤكد ✅\n{eng_text}\n🎯 {price:.1f} 🛑 {price+15:.1f}\n{res_info}\n{sig} Δ20 {d} Δ5 {d5}"
+            bonus = f"\n{video_bonus}" if video_bonus else ""
+            if "بيع" in eng_text:
+                txt=f"🚨 فوت بيع VIP ✅{bonus}\n{eng_text}\n🎯 {price:.1f} 🛑 {price+15:.1f} ✅ {price-18:.1f}/{price-32:.1f}\n{quad_info}\n{h1_info}\n{sig} Δ20 {d} Δ5 {d5}"
+            else:
+                txt=f"🚨 فوت شراء VIP ✅{bonus}\n{eng_text}\n🎯 {price:.1f} 🛑 {price-15:.1f} ✅ {price+18:.1f}/{price+32:.1f}\n{quad_info}\n{h1_info}\n{sig} Δ20 {d} Δ5 {d5}"
         with open('/tmp/c.png','rb') as f: bot.send_photo(m.chat.id,f,caption=txt)
     except Exception as e: bot.send_message(m.chat.id,f"خطأ {e}")
 
 def auto_watcher():
     while True:
         try:
-            time.sleep(90)
+            time.sleep(120)
             if not AUTO_CHATS: continue
             data=check_signal()
-            if not data: continue
-            # بس نبه اذا على مقاومة 4186 + ابتلاع بيعي
-            if not data["is_4186"]: continue
+            if not data or not data["can_trade"]: continue
             now=time.time()
             for chat_id in list(AUTO_CHATS):
-                if now-LAST_ALERT.get(chat_id,0) < 900: continue
-                txt=f"🚨 تنبيه مقاومة 4186 🚨\n{data['eng_text']} ✅\n{data['video_bonus']}\n🎯 دخول {data['price']:.1f} 🛑 {data['price']+12:.1f}\nPOC {data['poc']:.0f} | اسيا {data['asia_status']}\nارسل /tawsiya للشارت"
+                if now-LAST_ALERT.get(chat_id,0) < 1200: continue
+                txt=f"🚨 تنبيه VIP مؤكد 🚨\n{data['eng_text']} {data['video_bonus']}\n🎯 {data['price']:.1f} | POC {data['poc']:.0f}\n{data['sig']} Δ20 {data['d']} Δ5 {data['d5']}"
                 try: bot.send_message(chat_id, txt); LAST_ALERT[chat_id]=now
                 except: pass
         except Exception as e: print(f"watcher {e}"); time.sleep(10)
 
 @app.route('/')
-def home(): return "V54 4186 OK"
+def home(): return "V53 VIP VIDEO OK"
 
 def run_bot():
     while True:
