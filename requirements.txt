@@ -1,7 +1,7 @@
+skyfield
 pyTelegramBotAPI
-Flask
 yfinance
-pandas
-ta
 matplotlib
+flask
+pytz
 requests
