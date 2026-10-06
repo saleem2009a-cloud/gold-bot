@@ -1,10 +1,8 @@
-import matplotlib
-matplotlib.use('Agg')
 import os, requests, time, numpy as np
 from datetime import datetime
 import pytz
 TOKEN = "".join(os.getenv("BOT_TOKEN","").split())
-print("V58.5 DUAL TREND", flush=True)
+print("V58.6 STABLE", flush=True)
 
 import telebot
 from flask import Flask
@@ -14,108 +12,97 @@ app = Flask(__name__)
 bot = telebot.TeleBot(TOKEN)
 AUTO_CHATS = set()
 LAST_ALERT = {}
+LAST_SIDE = {"side":"انتظار","time":0,"price":0}
 
 def get_price():
     try:
         r=requests.get("https://api.gold-api.com/price/XAU",timeout=5).json()
         return float(r['price'])
-    except: return 4170.0
+    except: return 4163.0
 
-def get_dual_trend():
+def get_stable_trend():
     try:
         url = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F?range=1d&interval=5m"
         headers = {"User-Agent":"Mozilla/5.0"}
         r = requests.get(url, headers=headers, timeout=10).json()
         result = r['chart']['result'][0]
         closes = result['indicators']['quote'][0]['close']
-        closes = [c for c in closes if c is not None]
-        if len(closes) < 25: return 0,0,"خطأ"
+        closes = np.array([c for c in closes if c is not None], dtype=float)
+        if len(closes) < 30: return 0,0,0,"خطأ"
 
-        last = closes[-1]
-        short_prev = closes[-4] # 15 دقيقة
-        mid_prev = closes[-12] # 60 دقيقة
-        long_prev = closes[-24] # 120 دقيقة
+        # متوسط متحرك لتنعيم التقلب
+        def ma(arr, n): return np.mean(arr[-n:])
 
-        short_ch = last - short_prev
-        mid_ch = last - mid_prev
-        long_ch = last - long_prev
+        last_ma3 = ma(closes, 3) # متوسط آخر 3 شموع = 15د مستقر
+        short_ma = ma(closes, 6) # متوسط آخر 30د
+        long_ma = ma(closes, 24) # متوسط آخر 2س
 
-        txt = f"📉 لحظي 15د: {short_ch:+.1f}$ | 1س: {mid_ch:+.1f}$ | 2س: {long_ch:+.1f}$"
-        return short_ch, mid_ch, long_ch, txt, closes
+        short_ch = last_ma3 - short_ma
+        long_ch = last_ma3 - long_ma
+        # ترند الساعة
+        mid_ch = last_ma3 - ma(closes, 12)
+
+        txt = f"📊 15د مستقر: {short_ch:+.1f}$ | 1س: {mid_ch:+.1f}$ | 2س: {long_ch:+.1f}$"
+        return short_ch, mid_ch, long_ch, txt
     except Exception as e:
         print(f"trend err {e}")
-        return 0,0,0,"ترند غير معروف", []
+        return 0,0,0,"خطأ"
 
 def check_signal():
+    global LAST_SIDE
     try:
         price = get_price()
-        short_ch, mid_ch, long_ch, trend_txt, closes = get_dual_trend()
+        short_ch, mid_ch, long_ch, trend_txt = get_stable_trend()
 
-        # المنطق المزدوج
-        if long_ch < -5 and short_ch > 0:
-            # نازل كبير وطالع صغير = ارتداد وهمي للبيع
-            side = "انتظار"
-            score = 4
-            eng_text = f"⚠️ ارتداد وهمي +{short_ch:.1f}$ ضمن نزول {long_ch:.1f}$"
-            can_trade = False
-            bonus = f"{trend_txt}\n⏰ جلسة نيويورك 🔥🔥\n⚠️ لا تشتري - ارتداد للبيع فقط\n🌙 طور 83% | ☿ مباشر ✅"
-            patterns = [f"⚠️ ارتداد +{short_ch:.1f}$", f"🔻 ترند 2س نازل {long_ch:.1f}$", "انتظر بيع من فوق"]
-            sig = "⚪ ارتداد - انتظر بيع"
-        elif long_ch < -5 and short_ch < -1:
-            # نازل كبير ونازل صغير = بيع قوي
-            side = "بيع"
-            score = 8
-            eng_text = "🔴 بيع قوي - الترندين نازلين"
+        # فلتر ثبات - اذا الترند ضعيف (<1.5$) لا تغير رأي
+        now = time.time()
+        time_since_last = now - LAST_SIDE["time"]
+
+        # تحديد الاتجاه الجديد
+        if short_ch > 2.0 and long_ch > 0:
+            new_side = "شراء"
+            score = 8 if long_ch > 3 else 6
+            eng_text = "🟢 شراء مستقر" if long_ch > 0 else "🟢 شراء لحظي"
             can_trade = True
-            bonus = f"{trend_txt}\n⏰ جلسة نيويورك 🔥🔥 | قمة للبيع\n🌙 طور 83% | ☿ مباشر ✅\n🔴 بيع مع الترند الكبير والصغير ✅✅"
-            patterns = [f"🔻 نزول 15د {short_ch:.1f}$", f"🔻 نزول 2س {long_ch:.1f}$", "🔻 ضغط بيعي قوي"]
-            sig = "🔴 بيع مسيطر قوي"
-        elif long_ch > 5 and short_ch < 0:
-            side = "انتظار"
-            score = 4
-            eng_text = f"⚠️ هبوط وهمي {short_ch:.1f}$ ضمن صعود {long_ch:.1f}$"
-            can_trade = False
-            bonus = f"{trend_txt}\n⚠️ لا تبيع - هبوط للشراء فقط"
-            patterns = [f"⚠️ هبوط {short_ch:.1f}$", f"🔺 ترند 2س طالع {long_ch:.1f}$"]
-            sig = "⚪ هبوط - انتظر شراء"
-        elif long_ch > 5 and short_ch > 1:
-            side = "شراء"
-            score = 8
-            eng_text = "🟢 شراء قوي - الترندين طالعين"
+        elif short_ch < -2.0 and long_ch < 0:
+            new_side = "بيع"
+            score = 8 if long_ch < -3 else 6
+            eng_text = "🔴 بيع مستقر" if long_ch < 0 else "🔴 بيع لحظي"
             can_trade = True
-            bonus = f"{trend_txt}\n🟢 شراء مع الترند الكبير والصغير ✅✅"
-            patterns = [f"🔺 صعود 15د {short_ch:.1f}$", f"🔺 صعود 2س {long_ch:.1f}$"]
-            sig = "🟢 شراء مسيطر قوي"
+        elif short_ch > 2.0 and long_ch < -3:
+            new_side = "انتظار"
+            score = 4
+            eng_text = f"⚠️ ارتداد +{short_ch:.1f}$ ضمن نزول {long_ch:.1f}$ - انتظر بيع"
+            can_trade = False
+        elif short_ch < -2.0 and long_ch > 3:
+            new_side = "انتظار"
+            score = 4
+            eng_text = f"⚠️ تصحيح {short_ch:.1f}$ ضمن صعود {long_ch:.1f}$ - انتظر شراء"
+            can_trade = False
         else:
-            # عرضي
-            if abs(short_ch) < 1 and abs(long_ch) < 5:
-                side = "انتظار"
-                score = 3
-                eng_text = "⚪ عرضي"
-                can_trade = False
-                bonus = f"{trend_txt}\n⚪ سوق عرضي - لا تدخل"
-                patterns = ["⚪ عرضي"]
-                sig = "⚪ محايد"
-            else:
-                # ترند لحظي فقط
-                if short_ch < -1:
-                    side = "بيع"
-                    score = 6
-                    eng_text = "🔴 بيع لحظي"
-                    can_trade = True
-                    bonus = f"{trend_txt}\n🔴 بيع سكالبينج 15د"
-                    patterns = [f"🔻 نزول 15د {short_ch:.1f}$"]
-                    sig = "🔴 بيع لحظي"
-                else:
-                    side = "شراء"
-                    score = 5
-                    eng_text = "🟢 شراء لحظي"
-                    can_trade = True
-                    bonus = f"{trend_txt}\n🟢 شراء سكالبينج 15د"
-                    patterns = [f"🔺 صعود 15د {short_ch:.1f}$"]
-                    sig = "🟢 شراء لحظي"
+            new_side = "انتظار"
+            score = 3
+            eng_text = f"⚪ عرضي {short_ch:+.1f}$ - السوق متقلب"
+            can_trade = False
 
-        return {"price":price,"side":side,"score":score,"eng_text":eng_text,"can_trade":can_trade,"bonus":bonus,"patterns":patterns,"sig":sig,"trend_txt":trend_txt,"short_ch":short_ch,"long_ch":long_ch}
+        # مانع التقلب: اذا غير رأيو خلال 10 دقايق والسعر قريب، خليه على القديم
+        if LAST_SIDE["side"]!= "انتظار" and new_side!= "انتظار" and LAST_SIDE["side"]!= new_side:
+            if time_since_last < 600 and abs(price - LAST_SIDE["price"]) < 5:
+                # لا تغير، خليه انتظار
+                new_side = "انتظار"
+                eng_text = f"⏳ ثبّت - كان {LAST_SIDE['side']} من {int(time_since_last/60)}د، هلا متقلب {short_ch:+.1f}$"
+                can_trade = False
+                score = 3
+
+        # حدث الذاكرة فقط اذا في تداول حقيقي
+        if can_trade and new_side!= "انتظار":
+            LAST_SIDE = {"side":new_side,"time":now,"price":price}
+
+        bonus = f"{trend_txt}\n⏰ نيويورك 🔥🔥\n{'🔴 بيع مع الترندين ✅' if new_side=='بيع' else '🟢 شراء مع الترندين ✅' if new_side=='شراء' else '⏳ انتظر ثبات'}"
+        patterns = [f"15د: {short_ch:+.1f}$", f"2س: {long_ch:+.1f}$"]
+        sig = "🔴 بيع مستقر" if new_side=="بيع" else "🟢 شراء مستقر" if new_side=="شراء" else "⚪ انتظر ثبات"
+
+        return {"price":price,"side":new_side,"score":score,"eng_text":eng_text,"can_trade":can_trade,"bonus":bonus,"patterns":patterns,"sig":sig,"trend_txt":trend_txt,"short_ch":short_ch,"long_ch":long_ch}
     except Exception as e:
         print(f"check err {e}")
         price=get_price()
@@ -124,7 +111,7 @@ def check_signal():
 @bot.message_handler(commands=['auto_on','راقب'])
 def auto_on(m):
     AUTO_CHATS.add(m.chat.id); LAST_ALERT[m.chat.id]=0
-    bot.send_message(m.chat.id,"✅ V58.5 التنين سوا\nيومي + لحظي\n/وقف للإيقاف")
+    bot.send_message(m.chat.id,"✅ V58.6 مستقر - ما بغير رأيو كل دقيقتين\n/وقف للإيقاف")
 
 @bot.message_handler(commands=['auto_off','وقف'])
 def auto_off(m):
@@ -140,12 +127,12 @@ def tawsiya(m):
 
         pat_txt = "\n".join(patterns)
         if side == "انتظار":
-            txt=f"⛔ {eng_text} V58.5 سكور {score}/10\n\n{bonus}\n\n📍 أنماط:\n{pat_txt}\n\n💰 السعر {price:.1f}\n{sig}"
+            txt=f"⛔ {eng_text} V58.6 سكور {score}/10\n\n{bonus}\n\n📍 {pat_txt}\n\n💰 {price:.1f}\n{sig}"
         else:
             sl=price+15 if side=="بيع" else price-15
             tp1=price-18 if side=="بيع" else price+18
             tp2=price-32 if side=="بيع" else price+32
-            txt=f"✅ توصية {side} V58.5 سكور {score}/10\n{eng_text}\n\n{bonus}\n\n📍 أنماط:\n{pat_txt}\n\n🎯 {price:.1f} 🛑 {sl:.1f} ✅ {tp1:.1f}/{tp2:.1f}\n{sig}"
+            txt=f"✅ توصية {side} V58.6 سكور {score}/10\n{eng_text}\n\n{bonus}\n\n📍\n{pat_txt}\n\n🎯 {price:.1f} 🛑 {sl:.1f} ✅ {tp1:.1f}/{tp2:.1f}\n{sig}"
 
         bot.send_message(m.chat.id, txt)
     except Exception as e: bot.send_message(m.chat.id,f"خطأ {e}")
@@ -159,14 +146,14 @@ def auto_watcher():
             if not data or not data["can_trade"]: continue
             now=time.time()
             for chat_id in list(AUTO_CHATS):
-                if now-LAST_ALERT.get(chat_id,0) < 1200: continue
-                txt=f"🚨 V58.5 {data['side']} 🚨\n{data['trend_txt']}\n🎯 {data['price']:.1f}"
+                if now-LAST_ALERT.get(chat_id,0) < 900: continue
+                txt=f"🚨 V58.6 {data['side']} مستقر 🚨\n{data['trend_txt']}\n🎯 {data['price']:.1f}"
                 try: bot.send_message(chat_id, txt); LAST_ALERT[chat_id]=now
                 except: pass
         except Exception as e: print(f"watcher {e}"); time.sleep(10)
 
 @app.route('/')
-def home(): return "V58.5 DUAL OK"
+def home(): return "V58.6 STABLE OK"
 def run_bot():
     while True:
         try: bot.infinity_polling(timeout=60,long_polling_timeout=60)
