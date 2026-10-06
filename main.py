@@ -4,11 +4,9 @@ import os, requests, time, numpy as np
 from datetime import datetime
 import pytz
 TOKEN = "".join(os.getenv("BOT_TOKEN","").split())
-print("V58.3 TREND FIX", flush=True)
+print("V58.4 SHORT TREND", flush=True)
 
 import telebot
-import matplotlib.pyplot as plt
-from matplotlib.patches import Rectangle
 from flask import Flask
 import threading
 
@@ -21,72 +19,82 @@ def get_price():
     try:
         r=requests.get("https://api.gold-api.com/price/XAU",timeout=5).json()
         return float(r['price'])
-    except: return 4175.0
+    except: return 4170.0
 
 def get_real_trend():
-    # بيجيب الترند الحقيقي بدون yfinance
     try:
-        # جرب Yahoo API مباشر
         url = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F?range=1d&interval=5m"
         headers = {"User-Agent":"Mozilla/5.0"}
         r = requests.get(url, headers=headers, timeout=10).json()
         result = r['chart']['result'][0]
         closes = result['indicators']['quote'][0]['close']
         closes = [c for c in closes if c is not None]
-        if len(closes) < 20: return 0, "غير معروف"
+        if len(closes) < 10: return 0, 0, "غير معروف"
+
         last = closes[-1]
-        prev = closes[-20] # قبل 100 دقيقة
-        change = last - prev
-        pct = (change/prev)*100
-        if change < -5: return change, f"🔴 نازل قوي {change:.1f}$ ({pct:.2f}%)"
-        if change < 0: return change, f"🔴 نازل {change:.1f}$ ({pct:.2f}%)"
-        if change > 5: return change, f"🟢 طالع قوي +{change:.1f}$"
-        return change, f"🟢 طالع +{change:.1f}$"
+        short_prev = closes[-4] # قبل 15 دقيقة
+        long_prev = closes[-20] # قبل 100 دقيقة
+
+        short_change = last - short_prev
+        long_change = last - long_prev
+
+        # الترند اللحظي هو المهم
+        if short_change < -1.5:
+            txt = f"🔴 نازل لحظي {short_change:.1f}$ | يومي {long_change:+.1f}$"
+        elif short_change > 1.5:
+            txt = f"🟢 طالع لحظي +{short_change:.1f}$ | يومي {long_change:+.1f}$"
+        else:
+            txt = f"⚪ عرضي {short_change:.1f}$ | يومي {long_change:+.1f}$"
+
+        print(f"TREND: last {last} short {short_prev} change {short_change}")
+        return short_change, long_change, txt
     except Exception as e:
         print(f"trend err {e}")
-        return 0, "ترند غير معروف"
-
-def safe_vals(df, col):
-    v = df[col].values
-    if len(v.shape)>1: v = v.flatten()
-    return v.astype(float)
+        return 0, 0, "ترند غير معروف"
 
 def check_signal():
     try:
         price = get_price()
-        trend_change, trend_txt = get_real_trend()
+        short_change, long_change, trend_txt = get_real_trend()
 
-        # اذا نازل - ممنوع شراء
-        is_down = trend_change < -2
-
-        score = 5
-        reason = []
-        eng_text = "لا يوجد ابتلاع"
-
-        # منطق جديد حسب الترند الحقيقي
-        if is_down:
+        if short_change < -1.0: # نازل بآخر 15 دقيقة
             side = "بيع"
-            score = 6
-            eng_text = "🔴 ترند نازل مؤكد"
+            score = 7
+            eng_text = "🔴 نزول لحظي مؤكد"
             can_trade = True
-            bonus = f"{trend_txt}\n⏰ جلسة نيويورك 🔥🔥 | 🔄 دورة 20 شمعة | قمة دورة\n🌙 طور 83%\n☿ عطارد مباشر ✅\n🔴 بيع مع الترند ✅"
-            patterns = ["🔻 ترند نازل", "🔻 كسر دعم"]
-        else:
+            bonus = f"{trend_txt}\n⏰ جلسة نيويورك 🔥🔥 | قمة لحظية\n🌙 طور 83% | ☿ مباشر ✅\n🔴 بيع مع النزول اللحظي ✅"
+            patterns = [f"🔻 نزول {short_change:.1f}$ بآخر 15د", "🔻 ضغط بيعي"]
+            sig = "🔴 بيع مسيطر"
+            d5 = -3
+        elif short_change > 1.0:
             side = "شراء"
+            score = 6
+            eng_text = "🟢 صعود لحظي مؤكد"
             can_trade = True
-            bonus = f"{trend_txt}\n⏰ جلسة نيويورك 🔥🔥 | 🔄 دورة 20 شمعة | قاع دورة ✅\n🌙 طور 83%\n☿ عطارد مباشر ✅\n🟢 FVG داخل ✅"
-            patterns = ["9️⃣ تريبل بوتوم", "5️⃣ تجميع"]
+            bonus = f"{trend_txt}\n⏰ جلسة نيويورك 🔥🔥 | قاع لحظي\n🌙 طور 83% | ☿ مباشر ✅\n🟢 شراء مع الصعود اللحظي ✅"
+            patterns = [f"🔺 صعود {short_change:.1f}$ بآخر 15د", "تجميع"]
+            sig = "🟢 شراء مسيطر"
+            d5 = 3
+        else:
+            side = "انتظار"
+            score = 3
+            eng_text = "⚪ عرضي - لا يوجد ابتلاع"
+            can_trade = False
+            bonus = f"{trend_txt}\n⏰ عرضي | لا تدخل هلا"
+            patterns = ["⚪ عرضي"]
+            sig = "⚪ محايد"
+            d5 = 0
 
-        return {"price":price,"poc":price-5,"d":2,"d5":-2 if is_down else 2,"sig":"🔴 بيع مسيطر" if is_down else "🟢 شراء مسيطر","eng_text":eng_text,"eng_ok":is_down,"can_trade":can_trade,"df":None,"reason":reason,"patterns":patterns,"last_bull":(price-8,price-3,5) if not is_down else None,"last_bear":(price+3,price+8,5) if is_down else None,"in_bull":not is_down,"in_bear":is_down,"bonus":bonus,"score":score,"side":side,"trend_txt":trend_txt,"trend_change":trend_change}
+        return {"price":price,"poc":price,"d":d5,"d5":d5,"sig":sig,"eng_text":eng_text,"eng_ok":can_trade,"can_trade":can_trade,"patterns":patterns,"bonus":bonus,"score":score,"side":side,"trend_txt":trend_txt,"short_change":short_change}
     except Exception as e:
         print(f"check err {e}")
         price=get_price()
-        return {"price":price,"poc":price,"d":-2,"d5":-2,"sig":"🔴 بيع","eng_text":"🔴 نازل","eng_ok":True,"can_trade":True,"df":None,"reason":[],"patterns":["نازل"],"last_bull":None,"last_bear":(price+3,price+8,5),"in_bull":False,"in_bear":True,"bonus":"نازل","score":6,"side":"بيع","trend_txt":"نازل","trend_change":-5}
+        return {"price":price,"poc":price,"d":-2,"d5":-2,"sig":"🔴 بيع","eng_text":"🔴 نازل","eng_ok":True,"can_trade":True,"patterns":["نازل"],"bonus":"نازل","score":6,"side":"بيع","trend_txt":"نازل","short_change":-3}
 
 @bot.message_handler(commands=['auto_on','راقب'])
 def auto_on(m):
     AUTO_CHATS.add(m.chat.id); LAST_ALERT[m.chat.id]=0
-    bot.send_message(m.chat.id,"✅ V58.3 بيكشف النزول الحقيقي\n/وقف للإيقاف")
+    bot.send_message(m.chat.id,"✅ V58.4 بيكشف النزول اللحظي 15د\n/وقف للإيقاف")
 
 @bot.message_handler(commands=['auto_off','وقف'])
 def auto_off(m):
@@ -98,14 +106,16 @@ def tawsiya(m):
     try:
         AUTO_CHATS.add(m.chat.id)
         data=check_signal()
-        price=data["price"]; side=data["side"]; score=data["score"]; bonus=data["bonus"]; patterns=data["patterns"]; sig=data["sig"]; eng_text=data["eng_text"]; trend_txt=data["trend_txt"]
+        price=data["price"]; side=data["side"]; score=data["score"]; bonus=data["bonus"]; patterns=data["patterns"]; sig=data["sig"]; eng_text=data["eng_text"]
 
-        sl=price+15 if side=="بيع" else price-15
-        tp1=price-18 if side=="بيع" else price+18
-        tp2=price-32 if side=="بيع" else price+32
-
-        pat_txt = "\n".join(patterns)
-        txt=f"✅ توصية {side} V58.3 سكور {score}/10\n{eng_text}\n\n{trend_txt}\n\n{bonus}\n\n📍 أنماط:\n{pat_txt}\n\n🎯 {price:.1f} 🛑 {sl:.1f} ✅ {tp1:.1f}/{tp2:.1f}\n{sig}"
+        if side == "انتظار":
+            txt=f"⛔ {side} V58.4 سكور {score}/10\n{eng_text}\n\n{bonus}\n\n📍 {patterns[0]}\nالسعر {price:.1f}\n{sig}"
+        else:
+            sl=price+15 if side=="بيع" else price-15
+            tp1=price-18 if side=="بيع" else price+18
+            tp2=price-32 if side=="بيع" else price+32
+            pat_txt = "\n".join(patterns)
+            txt=f"✅ توصية {side} V58.4 سكور {score}/10\n{eng_text}\n\n{bonus}\n\n📍 أنماط:\n{pat_txt}\n\n🎯 {price:.1f} 🛑 {sl:.1f} ✅ {tp1:.1f}/{tp2:.1f}\n{sig}"
 
         bot.send_message(m.chat.id, txt)
     except Exception as e: bot.send_message(m.chat.id,f"خطأ {e}")
@@ -120,13 +130,13 @@ def auto_watcher():
             now=time.time()
             for chat_id in list(AUTO_CHATS):
                 if now-LAST_ALERT.get(chat_id,0) < 1200: continue
-                txt=f"🚨 V58.3 {data['side']} سكور {data['score']}/10 🚨\n{data['trend_txt']}\n🎯 {data['price']:.1f}"
+                txt=f"🚨 V58.4 {data['side']} {data['short_change']:.1f}$ 🚨\n{data['trend_txt']}\n🎯 {data['price']:.1f}"
                 try: bot.send_message(chat_id, txt); LAST_ALERT[chat_id]=now
                 except: pass
         except Exception as e: print(f"watcher {e}"); time.sleep(10)
 
 @app.route('/')
-def home(): return "V58.3 OK"
+def home(): return "V58.4 OK"
 def run_bot():
     while True:
         try: bot.infinity_polling(timeout=60,long_polling_timeout=60)
