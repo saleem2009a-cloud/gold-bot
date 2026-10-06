@@ -1,7 +1,8 @@
-skyfield
 pyTelegramBotAPI
 yfinance
 matplotlib
 flask
 pytz
 requests
+numpy
+skyfield
