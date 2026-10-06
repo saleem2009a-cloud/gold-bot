@@ -1,186 +1,65 @@
 import os, requests, time, numpy as np
 TOKEN = "".join(os.getenv("BOT_TOKEN","").split())
-print("V63 FINAL FIXED", flush=True)
+print("V64 SIMPLE", flush=True)
 import telebot
 from flask import Flask
 import threading
 app = Flask(__name__)
 bot = telebot.TeleBot(TOKEN)
 AUTO_CHATS=set(); LAST_ALERT={}
-LAST_SIDE={"side":"انتظار","time":0,"price":0}
 
 def get_price():
     try: return float(requests.get("https://api.gold-api.com/price/XAU",timeout=5).json()['price'])
-    except: return 4166.0
+    except: return 4165.0
 
 def get_data():
     try:
         url="https://query1.finance.yahoo.com/v8/finance/chart/GC=F?range=1d&interval=5m"
         r=requests.get(url,headers={"User-Agent":"Mozilla/5.0"},timeout=10).json()
         q=r['chart']['result'][0]['indicators']['quote'][0]
-        c=np.array([x for x in q['close'] if x is not None],float)[-80:]
-        o=np.array([x for x in q['open'] if x is not None],float)[-80:]
-        h=np.array([x for x in q['high'] if x is not None],float)[-80:]
-        l=np.array([x for x in q['low'] if x is not None],float)[-80:]
-        v=np.array([x for x in q['volume'] if x is not None],float)[-80:]
-        return o,h,l,c,v
-    except: return None,None,None,None,None
+        c=np.array([x for x in q['close'] if x is not None],float)[-60:]
+        o=np.array([x for x in q['open'] if x is not None],float)[-60:]
+        return o,c
+    except: return None,None
 
-def detect_engulfing(o,c):
-    o1,c1=o[-3],c[-3]; o2,c2=o[-2],c[-2]
-    b1=abs(c1-o1); b2=abs(c2-o2)
-    if b1<0.4: return "لا ابتلاع",False,"لا يوجد"
-    bear=(c1>o1)and(c2<o2)and(o2>=c1*0.998)and(c2<=o1*1.002)and b2>b1*1.2
-    bull=(c1<o1)and(c2>o2)and(o2<=c1*1.002)and(c2>=o1*0.998)and b2>b1*1.2
-    if bear: return "🔴 ابتلاع بيعي مؤكد ✅",True,"بيع"
-    if bull: return "🟢 ابتلاع شرائي مؤكد ✅",True,"شراء"
-    return "لا ابتلاع",False,"لا يوجد"
-
-def find_fvg(h,l,price):
-    bulls=[]; bears=[]
-    for i in range(2,len(h)):
-        if l[i]>h[i-2] and 1.0<(l[i]-h[i-2])<6:
-            mid=(h[i-2]+l[i])/2
-            dist=abs(mid-price)
-            if dist<15: bulls.append((min(h[i-2],l[i]), max(h[i-2],l[i]), mid, dist))
-        if h[i]<l[i-2] and 1.0<(l[i-2]-h[i])<6:
-            mid=(h[i]+l[i-2])/2
-            dist=abs(mid-price)
-            if dist<15: bears.append((min(h[i],l[i-2]), max(h[i],l[i-2]), mid, dist))
-    bull=min(bulls,key=lambda x:x[3]) if bulls else None
-    bear=min(bears,key=lambda x:x[3]) if bears else None
-    return bull,bear
-
-def detect_order_flow(o,h,l,c,v,price):
-    buy_vol=np.sum(v[-10:][c[-10:]>o[-10:]])
-    sell_vol=np.sum(v[-10:][c[-10:]<o[-10:]])
-    total=buy_vol+sell_vol if (buy_vol+sell_vol)>0 else 1
-    delta_pct=(buy_vol-sell_vol)/total*100
-
-    ob_side="لا يوجد"; ob_txt="لا OB"
-    for i in range(len(c)-5,len(c)-1):
-        if c[i]>o[i] and c[i+1]<o[i+1] and abs(c[i+1]-o[i+1])>abs(c[i]-o[i])*1.4:
-            ob_side="بيع"; ob_txt=f"OB بيعي {h[i]:.1f}"; break
-        if c[i]<o[i] and c[i+1]>o[i+1] and abs(c[i+1]-o[i+1])>abs(c[i]-o[i])*1.4:
-            ob_side="شراء"; ob_txt=f"OB شرائي {l[i]:.1f}"; break
-
-    sweep="لا يوجد"
-    if h[-2]>np.max(h[-12:-2]) and c[-1]<h[-2]-1.2: sweep="كسر قمة وهمي 🔴"
-    elif l[-2]<np.min(l[-12:-2]) and c[-1]>l[-2]+1.2: sweep="كسر قاع وهمي 🟢"
-
-    of_side="انتظار"
-    if delta_pct>=25: of_side="شراء"
-    elif delta_pct<=-25: of_side="بيع"
-    if "🟢" in sweep: of_side="شراء"
-    elif "🔴" in sweep: of_side="بيع"
-
-    txt=f"OF Delta {delta_pct:+.0f}% | {ob_txt} | {sweep}"
-    return of_side,txt,delta_pct
-
-def get_trend(c):
-    def ma(a,n): return np.mean(a[-n:])
-    last=ma(c,3); s=last-ma(c,6); m=last-ma(c,12); lo=last-ma(c,24)
-    return s,m,lo,f"15د:{s:+.1f}$ | 1س:{m:+.1f}$ | 2س:{lo:+.1f}$"
-
-def check_signal():
-    global LAST_SIDE
+def check():
     price=get_price()
-    o,h,l,c,v=get_data()
-    if o is None: return {"txt":"لا بيانات","can":False,"score":0,"main":"انتظار","price":price}
+    o,c=get_data()
+    if o is None: return "لا بيانات"
+    short = np.mean(c[-3:]) - np.mean(c[-6:])
+    long_ = np.mean(c[-3:]) - np.mean(c[-24:])
 
-    eng_txt,eng_ok,eng_side=detect_engulfing(o,c)
-    bull_fvg,bear_fvg=find_fvg(h,l,price)
-    of_side,of_txt,delta=get_trend_and_of_fix = detect_order_flow(o,h,l,c,v,price)
-    short,mid,long_,trend_txt=get_trend(c)
+    # ابتلاع بسيط
+    o1,c1=o[-3],c[-3]; o2,c2=o[-2],c[-2]
+    bull = (c1<o1) and (c2>o2) and abs(c2-o2)>abs(c1-o1)*1.3
+    bear = (c1>o1) and (c2<o2) and abs(c2-o2)>abs(c1-o1)*1.3
 
-    # سكور صحيح
-    votes=[]
-    if eng_ok: votes.append(eng_side)
-    if short>1.2: votes.append("شراء")
-    elif short<-1.2: votes.append("بيع")
-    if of_side!="انتظار": votes.append(of_side)
-
-    buy_v=votes.count("شراء"); sell_v=votes.count("بيع")
-    score = 3
-    if eng_ok: score+=2
-    if abs(short)>1.5: score+=1
-    if abs(long_)>5: score+=2
-    if of_side!="انتظار": score+=2
-    if buy_v==3 or sell_v==3: score=9
-    elif buy_v==2 or sell_v==2: score=7 if score<7 else score
-
-    if score>10: score=10
-
-    # قرار
-    if sell_v>=2 and short<0: main="بيع"
-    elif buy_v>=2 and short>0: main="شراء"
-    elif short<-2 and long_<-3: main="بيع"
-    elif short>2 and long_>3: main="شراء"
-    else: main="انتظار"
-
-    # مانع التقلب
-    now=time.time()
-    if LAST_SIDE["side"]!="انتظار" and main!="انتظار" and LAST_SIDE["side"]!=main and (now-LAST_SIDE["time"])<600 and abs(price-LAST_SIDE["price"])<6:
-        main="انتظار"; score=3
-
-    if main!="انتظار": LAST_SIDE={"side":main,"time":now,"price":price}
-
-    # دخول منطقي - اذا FVG بعيد اكتر من 6$ ادخل فوري
-    if main=="بيع":
-        if bear_fvg and bear_fvg[3]<=6:
-            entry=bear_fvg[2]; fvg_info=f"{bear_fvg[0]:.1f}-{bear_fvg[1]:.1f} قريب ✅"
-        else:
-            entry=price; fvg_info="لا FVG قريب - دخول فوري"
-        sl=entry+12; tp1=entry-12; tp2=entry-24
-        txt=f"🟢 V63 {main} سكور {score}/10 - توافق {max(buy_v,sell_v)}/3\n{trend_txt}\n{eng_txt}\n{of_txt}\n📦 بيع FVG: {fvg_info}\n\n🎯 دخول {entry:.1f}\n🛑 وقف {sl:.1f}\n✅ هدف1 {tp1:.1f} هدف2 {tp2:.1f}\n💰 الحالي {price:.1f}"
-        # تصحيح الايموجي
-        txt=txt.replace("🟢 V63 بيع","🔴 V63 بيع")
-    elif main=="شراء":
-        if bull_fvg and bull_fvg[3]<=6:
-            entry=bull_fvg[2]; fvg_info=f"{bull_fvg[0]:.1f}-{bull_fvg[1]:.1f} قريب ✅"
-        else:
-            entry=price; fvg_info="لا FVG قريب - دخول فوري"
-        sl=entry-12; tp1=entry+12; tp2=entry+24
-        txt=f"🟢 V63 {main} سكور {score}/10 - توافق {max(buy_v,sell_v)}/3\n{trend_txt}\n{eng_txt}\n{of_txt}\n📦 شراء FVG: {fvg_info}\n\n🎯 دخول {entry:.1f}\n🛑 وقف {sl:.1f}\n✅ هدف1 {tp1:.1f} هدف2 {tp2:.1f}\n💰 الحالي {price:.1f}"
+    if short>1.5 and long_>3 and bull:
+        return f"🟢 شراء قوي {price:.1f}\nوقف {price-12:.1f} هدف {price+15:.1f}\nالسبب: ترند طالع + ابتلاع شرائي\nالزمن 18:00 نيويورك 🔥"
+    elif short<-1.5 and long_<-3 and bear:
+        return f"🔴 بيع قوي {price:.1f}\nوقف {price+12:.1f} هدف {price-15:.1f}\nالسبب: ترند نازل + ابتلاع بيعي"
+    elif short>1.5 and long_>3:
+        return f"🟢 شراء {price:.1f} (بدون ابتلاع)\nوقف {price-12:.1f} هدف {price+12:.1f}\nالترند طالع بس انتظر ابتلاع لسكور عالي"
+    elif short<-1.5 and long_<-3:
+        return f"🔴 بيع {price:.1f} (بدون ابتلاع)\nوقف {price+12:.1f} هدف {price-12:.1f}\nالترند نازل"
     else:
-        txt=f"⛔ V63 انتظار سكور {score}/10\n{trend_txt}\n{eng_txt}\n{of_txt}\n💰 الحالي {price:.1f}\n⏳ انتظر توافق 2/3"
-
-    return {"txt":txt,"can":main!="انتظار" and score>=6,"score":score,"main":main,"price":price}
+        return f"⛔ انتظار - لا تدخل هلا\nالسعر {price:.1f}\n15د: {short:+.1f}$ 2س: {long_:+.1f}$\nالسبب: السوق عرضي/متقلب\nانتظر 10 دقايق"
 
 @bot.message_handler(commands=['start','tawsiya'])
 def tawsiya(m):
-    AUTO_CHATS.add(m.chat.id)
-    bot.send_message(m.chat.id, check_signal()["txt"])
+    bot.send_message(m.chat.id, check())
 
 @bot.message_handler(commands=['auto_on','راقب'])
 def auto_on(m):
-    AUTO_CHATS.add(m.chat.id); LAST_ALERT[m.chat.id]=0
-    bot.send_message(m.chat.id,"✅ V63 FINAL\nابتلاع + ترندين + FVG + Order Flow\nالقديم كلو موجود + مصلح\n/tawsiya")
-
-@bot.message_handler(commands=['auto_off','وقف'])
-def auto_off(m):
-    AUTO_CHATS.discard(m.chat.id)
-    bot.send_message(m.chat.id,"⛔ وقفت")
-
-def watcher():
-    while True:
-        time.sleep(180)
-        if not AUTO_CHATS: continue
-        d=check_signal()
-        if not d["can"] or d["score"]<7: continue
-        now=time.time()
-        for cid in list(AUTO_CHATS):
-            if now-LAST_ALERT.get(cid,0)<900: continue
-            try: bot.send_message(cid,f"🚨 V63 تنبيه 🚨\n{d['txt']}"); LAST_ALERT[cid]=now
-            except: pass
+    AUTO_CHATS.add(m.chat.id)
+    bot.send_message(m.chat.id,"✅ شغال - ببعتلك بس لما يكون شراء/بيع قوي\n/tawsiya للفحص")
 
 @app.route('/')
-def home(): return "V63 FIXED OK"
+def home(): return "V64 SIMPLE OK"
 def run_bot():
     while True:
         try: bot.infinity_polling(timeout=60,long_polling_timeout=60)
         except: time.sleep(5)
 threading.Thread(target=run_bot,daemon=True).start()
-threading.Thread(target=watcher,daemon=True).start()
 if __name__=="__main__":
     app.run(host="0.0.0.0",port=int(os.environ.get("PORT",10000)))
