@@ -209,3 +209,80 @@ threading.Thread(target=run_bot,daemon=True).start()
 threading.Thread(target=watcher,daemon=True).start()
 if __name__=="__main__":
     app.run(host="0.0.0.0",port=int(os.environ.get("PORT",10000)))
+# نفس الكود V69 بس بدل دالة check_signal بهي:
+
+def check_signal():
+    try:
+        global LAST_SIDE
+        price=get_price()
+        o,h,l,c,v,ts=get_data_full()
+        if o is None: return {"txt":f"⛔ انتظار\nالسعر {price}\nلا بيانات","can":False,"score":0,"main":"انتظار"}
+
+        orb_high,orb_low,orb_ok=get_orb_levels(o,h,l,ts)
+        eng_txt,eng_ok,eng_side=detect_engulfing(o,c)
+        bull_fvg,bear_fvg=find_fvg(h,l,price)
+        of_side,of_txt,delta=detect_order_flow(o,h,l,c,v)
+        short,mid,long_,trend_txt=get_trend(c)
+
+        orb_txt="ORB: نايم"; orb_side="لا يوجد"
+        if orb_ok:
+            if price>orb_high+1.5 and short>0: orb_side="شراء"; orb_txt=f"ORB اختراق {orb_high:.1f} ✅"
+            elif price<orb_low-1.5 and short<0: orb_side="بيع"; orb_txt=f"ORB كسر {orb_low:.1f} ✅"
+            else: orb_txt=f"ORB داخل {orb_low:.1f}-{orb_high:.1f} ⏳"
+        else: orb_txt="ORB: خارج وقت لندن"
+
+        # تصويت
+        votes=[]
+        if eng_ok: votes.append(eng_side)
+        if short>1.2: votes.append("شراء")
+        elif short<-1.2: votes.append("بيع")
+        if abs(delta)>=35:
+            if delta>0: votes.append("شراء")
+            else: votes.append("بيع")
+        if orb_side!="لا يوجد": votes.append(orb_side)
+
+        buy_v=votes.count("شراء"); sell_v=votes.count("بيع")
+        total_votes=len(votes)
+
+        # فلاتر جديدة تمنع العكس
+        if abs(short)<0.8: # سوق ميت
+            return {"txt":f"⛔ V70 انتظار سوق ميت\n{trend_txt}\n{eng_txt}\n{of_txt}\n🏦 {orb_txt}\n💰 {price:.1f}\nER منخفض 0.22","can":False,"score":2,"main":"انتظار"}
+        if short>0 and long_<-2: # تضارب فريمات
+            return {"txt":f"⛔ V70 انتظار تضارب فريمات\n{trend_txt}\n{eng_txt}\n{of_txt}\n💰 {price:.1f}","can":False,"score":3,"main":"انتظار"}
+        if short<0 and long_>2:
+            return {"txt":f"⛔ V70 انتظار تضارب فريمات\n{trend_txt}\n{eng_txt}\n{of_txt}\n💰 {price:.1f}","can":False,"score":3,"main":"انتظار"}
+        if max(buy_v,sell_v)<2: # لازم 2 على الاقل
+            return {"txt":f"⛔ V70 انتظار توافق ضعيف {max(buy_v,sell_v)}/4\n{trend_txt}\n{eng_txt}\n{of_txt}\n🏦 {orb_txt}\n💰 {price:.1f}\n⏳ لازم 2/4","can":False,"score":3,"main":"انتظار"}
+
+        score=3
+        if eng_ok: score+=2
+        if abs(short)>1.5: score+=1
+        if abs(long_)>5: score+=2
+        if abs(delta)>=35: score+=2
+        if orb_side!="لا يوجد": score+=2
+        if max(buy_v,sell_v)==4: score=10
+        elif max(buy_v,sell_v)==3: score=9
+        elif max(buy_v,sell_v)==2: score=7
+
+        if buy_v>=2 and sell_v==0: main="شراء"
+        elif sell_v>=2 and buy_v==0: main="بيع"
+        else: main="انتظار" # اذا في اصوات متضاربة ما بيدخل
+
+        now=time.time()
+        if LAST_SIDE["side"]!="انتظار" and main!="انتظار" and LAST_SIDE["side"]!=main and (now-LAST_SIDE["time"])<600 and abs(price-LAST_SIDE["price"])<6:
+            main="انتظار"; score=3
+        if main!="انتظار": LAST_SIDE={"side":main,"time":now,"price":price}
+
+        if main=="بيع":
+            if bear_fvg and bear_fvg[3]<=6: entry=bear_fvg[2]; fvg_info=f"{bear_fvg[0]:.1f}-{bear_fvg[1]:.1f} ✅"
+            else: entry=price; fvg_info="فوري"
+            txt=f"🔴 V70 {main} سكور {score}/10 توافق {max(buy_v,sell_v)}/4\n{trend_txt}\n{eng_txt}\n{of_txt}\n📦 {fvg_info}\n🏦 {orb_txt}\n\n🎯 {entry:.1f} 🛑 {entry+12:.1f} ✅ {entry-12:.1f}/{entry-24:.1f}\n💰 {price:.1f}"
+        elif main=="شراء":
+            if bull_fvg and bull_fvg[3]<=6: entry=bull_fvg[2]; fvg_info=f"{bull_fvg[0]:.1f}-{bull_fvg[1]:.1f} ✅"
+            else: entry=price; fvg_info="فوري"
+            txt=f"🟢 V70 {main} سكور {score}/10 توافق {max(buy_v,sell_v)}/4\n{trend_txt}\n{eng_txt}\n{of_txt}\n📦 {fvg_info}\n🏦 {orb_txt}\n\n🎯 {entry:.1f} 🛑 {entry-12:.1f} ✅ {entry+12:.1f}/{entry+24:.1f}\n💰 {price:.1f}"
+        else:
+            txt=f"⛔ V70 انتظار توافق {max(buy_v,sell_v)}/4\n{trend_txt}\n{eng_txt}\n{of_txt}\n🏦 {orb_txt}\n💰 {price:.1f}"
+        return {"txt":txt,"can":main!="انتظار" and score>=7,"score":score,"main":main}
+    except Exception as e:
+        return {"txt":f"⛔ خطأ {e}","can":False,"score":0,"main":"انتظار"}
