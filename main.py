@@ -20,18 +20,39 @@ print(f"[startup] token set: {bool(TOKEN)} | chat id set: {bool(CHAT)}", flush=T
 
 SYMBOL = "GC=F"                          # عقود الذهب (قريب من السبوت)
 MIN_SCORE = int(os.getenv("MIN_SCORE", "70"))
-COOLDOWN = 3 * 3600
-CHECK_EVERY = 300
-FIB = [21, 34, 55, 89, 144]              # دورات فيبوناتشي (أيام)
-GANN = [90, 180, 360]                    # دورات جان (أيام)
+CHECK_EVERY = 120                        # فحص كل دقيقتين
+COOLDOWN = 3600
+SESSION = (7, 20)                        # ساعات لندن + نيويورك (UTC) للتوصيات التلقائية
+FIB = [21, 34, 55, 89, 144]
+GANN = [90, 180, 360]
 
 app = Flask(__name__)
 last = {"dir": None, "t": 0}
 status = {"msg": "starting"}
 auto = {"on": True}
+active = {"sig": None, "t0": None, "be": False}
+_cache = {}
 
 
-# ---------------- مؤشرات فنية ----------------
+# ---------------- بيانات ----------------
+def get(interval, period):
+    df = yf.download(SYMBOL, interval=interval, period=period,
+                     progress=False, auto_adjust=True)
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+    return df.dropna()
+
+
+def get_cached(interval, period, ttl):
+    k = (interval, period)
+    if k in _cache and time.time() - _cache[k][0] < ttl:
+        return _cache[k][1]
+    df = get(interval, period)
+    _cache[k] = (time.time(), df)
+    return df
+
+
+# ---------------- مؤشرات ----------------
 def ema(s, n):
     return s.ewm(span=n, adjust=False).mean()
 
@@ -45,18 +66,25 @@ def rsi(s, n=14):
 
 def atr(df, n=14):
     pc = df["Close"].shift()
-    tr = pd.concat([df["High"] - df["Low"],
-                    (df["High"] - pc).abs(),
+    tr = pd.concat([df["High"] - df["Low"], (df["High"] - pc).abs(),
                     (df["Low"] - pc).abs()], axis=1).max(axis=1)
     return tr.ewm(alpha=1 / n, adjust=False).mean()
 
 
-def get(interval, period):
-    df = yf.download(SYMBOL, interval=interval, period=period,
-                     progress=False, auto_adjust=True)
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-    return df.dropna()
+def adx(df, n=14):
+    up, dn = df["High"].diff(), -df["Low"].diff()
+    pdm = ((up > dn) & (up > 0)) * up
+    ndm = ((dn > up) & (dn > 0)) * dn
+    a = atr(df, n)
+    pdi = 100 * pdm.ewm(alpha=1 / n, adjust=False).mean() / a
+    ndi = 100 * ndm.ewm(alpha=1 / n, adjust=False).mean() / a
+    dx = 100 * (pdi - ndi).abs() / (pdi + ndi)
+    return dx.ewm(alpha=1 / n, adjust=False).mean()
+
+
+def macd_hist(c):
+    m = ema(c, 12) - ema(c, 26)
+    return m - ema(m, 9)
 
 
 def trend(df):
@@ -74,16 +102,65 @@ def nm(t):
     return {1: "صاعد 🟢", -1: "هابط 🔴", 0: "محايد ⚪"}[t]
 
 
+# ---------------- شموع ----------------
 def engulf(df):
-    """ابتلاع على آخر شمعة مغلقة: 1 صاعد، -1 هابط، 0 لا يوجد"""
     o, c = df["Open"], df["Close"]
-    po, pc = o.iloc[-3], c.iloc[-3]
-    co, cc = o.iloc[-2], c.iloc[-2]
+    po, pc, co, cc = o.iloc[-3], c.iloc[-3], o.iloc[-2], c.iloc[-2]
     if pc < po and cc > co and cc >= po and co <= pc:
         return 1
     if pc > po and cc < co and cc <= po and co >= pc:
         return -1
     return 0
+
+
+def pinbar(df):
+    o, c, h, l = [float(df[k].iloc[-2]) for k in ("Open", "Close", "High", "Low")]
+    body, rng = abs(c - o), h - l
+    if rng <= 0:
+        return 0
+    lw, uw = min(o, c) - l, h - max(o, c)
+    b = max(body, rng * 0.05)
+    if lw >= 2 * b and lw >= 0.55 * rng:
+        return 1
+    if uw >= 2 * b and uw >= 0.55 * rng:
+        return -1
+    return 0
+
+
+# ---------------- مستويات وفيبو ----------------
+def pivots(df, w=3, look=200):
+    h, l, n = df["High"], df["Low"], len(df)
+    hs, ls = [], []
+    for i in range(max(w, n - look), n - w - 1):
+        if h.iloc[i] == h.iloc[i - w:i + w + 1].max():
+            hs.append(float(h.iloc[i]))
+        if l.iloc[i] == l.iloc[i - w:i + w + 1].min():
+            ls.append(float(l.iloc[i]))
+    return hs, ls
+
+
+def near_level(h1, d, price, a):
+    hs, ls = pivots(h1)
+    if d == 1:
+        c = [x for x in ls if x <= price + 0.3 * a and price - x <= 0.8 * a]
+        return max(c) if c else None
+    c = [x for x in hs if x >= price - 0.3 * a and x - price <= 0.8 * a]
+    return min(c) if c else None
+
+
+def fib_zone(h4, d, price):
+    seg = h4.iloc[-42:-1]
+    ih, il = int(seg["High"].values.argmax()), int(seg["Low"].values.argmin())
+    H, L = float(seg["High"].max()), float(seg["Low"].min())
+    if H - L <= 0:
+        return False
+    if d == 1 and il < ih:
+        ret = (H - price) / (H - L)
+    elif d == -1 and ih < il:
+        ret = (price - L) / (H - L)
+    else:
+        return False
+    return 0.382 <= ret <= 0.618
 
 
 # ---------------- الدورات الزمنية ----------------
@@ -105,102 +182,103 @@ def cycle(d1):
         days = (today - d1.index[sl].date()).days
         hit = [x for x in FIB + GANN if abs(days - x) <= 1]
         low_hit = bool(hit)
-        lines.append(f"آخر قاع قبل {days} يوم" + (f" ⚡ نافذة دورية {hit[0]}" if hit else ""))
+        lines.append(f"آخر قاع قبل {days} يوم" + (f" ⚡ دورة {hit[0]}" if hit else ""))
     if sh is not None:
         days = (today - d1.index[sh].date()).days
         hit = [x for x in FIB + GANN if abs(days - x) <= 1]
         high_hit = bool(hit)
-        lines.append(f"آخر قمة قبل {days} يوم" + (f" ⚡ نافذة دورية {hit[0]}" if hit else ""))
+        lines.append(f"آخر قمة قبل {days} يوم" + (f" ⚡ دورة {hit[0]}" if hit else ""))
     if lines:
         res["txt"] = "⏳ الدورات: " + " | ".join(lines)
     if low_hit and not high_hit:
-        res["support"] = 1      # نافذة قاع ← دعم الشراء
+        res["support"] = 1
     elif high_hit and not low_hit:
-        res["support"] = -1     # نافذة قمة ← دعم البيع
+        res["support"] = -1
     return res
-
-
-# ---------------- الفلكي (أطوار القمر) ----------------
-def moon():
-    ref = datetime(2000, 1, 6, 18, 14, tzinfo=timezone.utc)
-    syn = 29.530588853
-    age = ((datetime.now(timezone.utc) - ref).total_seconds() / 86400) % syn
-    if age < 1.0 or age > syn - 1.0:
-        return "🌑 قمر جديد: نافذة انعكاس محتملة", True
-    if abs(age - syn / 2) < 1.0:
-        return "🌕 بدر: نافذة انعكاس محتملة", True
-    ph = "هلال متزايد" if age < syn / 2 else "هلال متناقص"
-    return f"🌙 {ph} (عمر {age:.0f} يوم)", False
 
 
 # ---------------- التحليل الكامل ----------------
 def analyze():
-    d1 = get("1d", "2y")
+    d1 = get_cached("1d", "2y", 3600)
     h1 = get("1h", "60d")
     h4 = h1.resample("4h").agg({"Open": "first", "High": "max", "Low": "min",
                                 "Close": "last"}).dropna()
     m15 = get("15m", "5d")
 
-    price = float(h1["Close"].iloc[-1])
+    price = float(m15["Close"].iloc[-1])
     t_d1, t_h4 = trend(d1), trend(h4)
-    moon_txt, moon_hit = moon()
     cyc = cycle(d1)
-    r = {"price": price, "t_d1": t_d1, "t_h4": t_h4, "moon": moon_txt,
-         "cycle": cyc["txt"], "dir": None, "score": 0, "notes": []}
+    hour = datetime.now(timezone.utc).hour
+    r = {"price": price, "t_d1": t_d1, "t_h4": t_h4, "cycle": cyc["txt"],
+         "dir": None, "score": 0, "notes": [],
+         "in_session": SESSION[0] <= hour < SESSION[1]}
     if t_h4 == 0 or t_d1 == -t_h4:
         return r
 
     d = t_h4
-    notes = [f"اتجاه H4 {nm(d)} (+25)"]
-    score = 25
+    kind = "صاعد" if d == 1 else "هابط"
+    score, notes = 20, [f"اتجاه H4 {nm(d)} (+20)"]
     if t_d1 == d:
-        score += 15
-        notes.append("D1 يوافق الاتجاه (+15)")
+        score += 10
+        notes.append("D1 يوافق (+10)")
 
     c = h1["Close"]
-    e21, e50 = ema(c, 21), ema(c, 50)
     a = float(atr(h1).iloc[-2])
-    rr = rsi(c)
-    if (e21.iloc[-2] > e50.iloc[-2]) == (d == 1):
+    ax = float(adx(h1).iloc[-2])
+    if ax >= 20:
         score += 10
-        notes.append("ترتيب المتوسطات H1 (+10)")
+        notes.append(f"سوق ذو اتجاه ADX={ax:.0f} (+10)")
+    elif ax < 15:
+        score -= 15
+        notes.append(f"سوق عرضي ADX={ax:.0f} (-15)")
+
+    e21, e50 = ema(c, 21), ema(c, 50)
+    if (e21.iloc[-2] > e50.iloc[-2]) == (d == 1):
+        score += 5
+        notes.append("ترتيب المتوسطات H1 (+5)")
+
+    in_fib = fib_zone(h4, d, price)
     dist = abs(price - float(e21.iloc[-2]))
-    if dist <= a:
+    if in_fib or dist <= a:
         score += 15
-        notes.append("تصحيح قريب من EMA21 (+15)")
+        notes.append("منطقة تصحيح (فيبو 38-62% أو EMA21) (+15)")
     elif dist > 2 * a:
         score -= 15
         notes.append("السعر ممتد، خطر مطاردة (-15)")
-    if d == 1 and 40 <= rr.iloc[-2] <= 62 and rr.iloc[-2] > rr.iloc[-3]:
-        score += 5
-        notes.append("RSI يدعم الشراء (+5)")
-    if d == -1 and 38 <= rr.iloc[-2] <= 60 and rr.iloc[-2] < rr.iloc[-3]:
-        score += 5
-        notes.append("RSI يدعم البيع (+5)")
+
+    lvl = near_level(h1, d, price, a)
+    if lvl is not None:
+        score += 10
+        notes.append(f"قرب {'دعم' if d == 1 else 'مقاومة'} {lvl:.2f} (+10)")
 
     e4, e1, em = engulf(h4), engulf(h1), engulf(m15)
-    kind = "صاعد" if d == 1 else "هابط"
-    if e4 == d:
+    p4, p1 = pinbar(h4), pinbar(h1)
+    if e4 == d or e1 == d:
         score += 15
-        notes.append(f"ابتلاع {kind} على H4 (+15)")
-    elif e1 == d:
-        score += 15
-        notes.append(f"ابتلاع {kind} على H1 (+15)")
+        notes.append(f"ابتلاع {kind} H4/H1 (+15)")
+    elif p4 == d or p1 == d:
+        score += 10
+        notes.append(f"شمعة رفض (Pin Bar) {kind} (+10)")
     elif em == d:
         score += 8
-        notes.append(f"ابتلاع {kind} على M15 (+8)")
+        notes.append(f"ابتلاع {kind} M15 (+8)")
+
+    mh = macd_hist(c)
+    if (mh.iloc[-2] > mh.iloc[-3]) == (d == 1):
+        score += 5
+        notes.append("زخم MACD يدعم (+5)")
 
     if cyc["support"] == d:
         score += 10
-        notes.append("نافذة دورة زمنية تدعم الاتجاه (+10)")
-        if moon_hit:
-            score += 5
-            notes.append("توافق فلكي (+5)")
+        notes.append("نافذة دورة زمنية تدعم (+10)")
 
-    sl_dist, tp_dist = 1.5 * a, 3.0 * a
+    sl_dist = 1.5 * a
+    if lvl is not None:
+        alt = abs(price - (lvl - d * 0.4 * a))
+        sl_dist = min(max(alt, 1.0 * a), 2.2 * a)
     r.update(dir=d, score=max(0, min(100, score)), notes=notes,
-             entry=price, sl=price - d * sl_dist, tp=price + d * tp_dist,
-             rr=tp_dist / sl_dist)
+             entry=price, sl=price - d * sl_dist, sl0=price - d * sl_dist,
+             tp=price + d * 2 * sl_dist, tp1=price + d * sl_dist, rr=2.0)
     return r
 
 
@@ -213,16 +291,50 @@ def fmt(r, header="🥇 تحليل الذهب"):
         side = "شراء 🟢" if r["dir"] == 1 else "بيع 🔴"
         if r["score"] >= MIN_SCORE:
             L += [f"✅ توصية: {side}", f"الدخول: {r['entry']:.2f}",
-                  f"وقف الخسارة: {r['sl']:.2f}", f"الهدف: {r['tp']:.2f}",
-                  f"ربح/خسارة: {r['rr']:.1f}"]
+                  f"وقف الخسارة: {r['sl']:.2f}",
+                  f"الهدف 1 (انقل الوقف للتعادل): {r['tp1']:.2f}",
+                  f"الهدف النهائي: {r['tp']:.2f} (ربح/خسارة 2:1)"]
         else:
             L.append(f"⚪ لا فرصة قوية بعد ({side} محتمل)، الأفضل الانتظار")
         L.append(f"قوة الإشارة: {r['score']}/100")
         L += ["• " + n for n in r["notes"]]
-    L += [r["cycle"], r["moon"],
-          "ℹ️ الدورات والفلك عوامل مساعدة بوزن صغير فقط، والقرار للفني.",
-          "⚠️ تحليل آلي وليس توصية مالية. خاطر بأقل من 1% من الرصيد."]
+    L.append(r["cycle"])
+    if not r["in_session"]:
+        L.append("🕒 خارج جلسة لندن/نيويورك: سيولة أقل")
+    L.append("⚠️ تحليل آلي وليس توصية مالية. خاطر بأقل من 1% من الرصيد.")
     return "\n".join(L)
+
+
+# ---------------- تتبع الصفقة ----------------
+def track():
+    s = active["sig"]
+    if not s:
+        return
+    now = pd.Timestamp.now(tz="UTC")
+    if now - active["t0_orig"] > pd.Timedelta(hours=24):
+        send("⌛ انتهت صلاحية التوصية (24 ساعة). تجاهلها وانتظر إعداداً جديداً.")
+        active.update(sig=None)
+        return
+    m = get("15m", "1d")
+    bars = m[m.index > active["t0"]]
+    if bars.empty:
+        return
+    hi, lo, d = float(bars["High"].max()), float(bars["Low"].min()), s["dir"]
+    hit_sl = lo <= s["sl"] if d == 1 else hi >= s["sl"]
+    hit_tp = hi >= s["tp"] if d == 1 else lo <= s["tp"]
+    reach1 = hi >= s["tp1"] if d == 1 else lo <= s["tp1"]
+    if hit_sl:
+        send("🛑 ضرب وقف الخسارة." if not active["be"] else "⚪ خرجت عند التعادل (الوقف المنقول).")
+        last["t"] = time.time()
+        active.update(sig=None)
+    elif hit_tp:
+        send("🎯 تحقق الهدف النهائي! ربح 2R ✅")
+        last["t"] = time.time()
+        active.update(sig=None)
+    elif reach1 and not active["be"]:
+        s["sl"] = s["entry"]
+        active.update(be=True, t0=now)
+        send(f"🔔 وصل السعر الهدف 1 ({s['tp1']:.2f}). انقل الوقف إلى الدخول {s['entry']:.2f}.")
 
 
 # ---------------- تليجرام ----------------
@@ -242,12 +354,16 @@ def reply(chat_id, text):
 def loop():
     while True:
         try:
+            track()
             r = analyze()
             status["msg"] = f"سعر {r['price']:.2f} | قوة {r['score']}"
-            if auto["on"] and r["dir"] and r["score"] >= MIN_SCORE:
-                if r["dir"] != last["dir"] or time.time() - last["t"] > COOLDOWN:
-                    send(fmt(r, "🔔 توصية جديدة"))
-                    last.update(dir=r["dir"], t=time.time())
+            if (auto["on"] and r["dir"] and r["score"] >= MIN_SCORE and r["in_session"]
+                    and active["sig"] is None
+                    and (r["dir"] != last["dir"] or time.time() - last["t"] > COOLDOWN)):
+                send(fmt(r, "🔔 توصية جديدة"))
+                now = pd.Timestamp.now(tz="UTC")
+                active.update(sig=r, t0=now, t0_orig=now, be=False)
+                last.update(dir=r["dir"], t=time.time())
         except Exception as e:
             status["msg"] = f"error: {e}"
             print(f"[loop] error: {e}", flush=True)
@@ -285,12 +401,15 @@ def commands():
                     reply(cid, f"💰 الذهب الآن: {p:.2f}")
                 elif text.startswith("/auto_on"):
                     auto["on"] = True
-                    reply(cid, "✅ التوصيات التلقائية مفعّلة")
+                    reply(cid, "✅ التوصيات التلقائية مفعّلة (فحص كل دقيقتين)")
                 elif text.startswith("/auto_off"):
                     auto["on"] = False
                     reply(cid, "⏸️ التوصيات التلقائية متوقفة")
                 elif text.startswith("/status"):
-                    reply(cid, f"التلقائي: {'شغال' if auto['on'] else 'متوقف'}\nآخر فحص: {status['msg']}")
+                    s = active["sig"]
+                    t = (f"\nصفقة نشطة: {'شراء' if s['dir'] == 1 else 'بيع'} من {s['entry']:.2f}"
+                         f" | SL {s['sl']:.2f} | TP {s['tp']:.2f}") if s else "\nلا صفقة نشطة"
+                    reply(cid, f"التلقائي: {'شغال' if auto['on'] else 'متوقف'}\nآخر فحص: {status['msg']}{t}")
                 elif text.startswith("/start"):
                     reply(cid, "أهلاً! الأوامر:\n/tawsiya تحليل كامل\n/price السعر\n/auto_on /auto_off\n/status")
         except Exception as e:
