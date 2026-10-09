@@ -23,6 +23,7 @@ CHECK_EVERY = 300                        # فحص كل 5 دقائق
 app = Flask(__name__)
 last = {"dir": None, "t": 0}
 status = {"msg": "starting"}
+auto = {"on": True}
 
 
 def ema(s, n):
@@ -54,13 +55,17 @@ def get(interval, period):
 
 def trend(df):
     c = df["Close"]
-    e50, e200 = ema(c, 50).iloc[-2], ema(c, 200).iloc[-2]
     p = c.iloc[-2]
-    if p > e50 > e200:
+    e21, e50 = ema(c, 21).iloc[-2], ema(c, 50).iloc[-2]
+    if p > e50 and e21 > e50:
         return 1
-    if p < e50 < e200:
+    if p < e50 and e21 < e50:
         return -1
     return 0
+
+
+def nm(t):
+    return {1: "صاعد 🟢", -1: "هابط 🔴", 0: "محايد ⚪"}[t]
 
 
 def analyze():
@@ -72,7 +77,7 @@ def analyze():
 
     t_d1, t_h4 = trend(d1), trend(h4)
     if t_h4 == 0 or t_d1 == -t_h4:
-        return None, "لا اتجاه واضح أو تعارض بين D1 وH4"
+        return None, f"D1: {nm(t_d1)} | H4: {nm(t_h4)} ← لا اتجاه مشترك واضح"
     d = t_h4
     score = 30                                  # اتجاه H4
     score += 20 if t_d1 == d else 0             # توافق D1
@@ -117,7 +122,7 @@ def loop():
         try:
             sig, info = analyze()
             status["msg"] = info
-            if sig and sig["score"] >= MIN_SCORE:
+            if auto["on"] and sig and sig["score"] >= MIN_SCORE:
                 if sig["dir"] != last["dir"] or time.time() - last["t"] > COOLDOWN:
                     send(fmt(sig))
                     last.update(dir=sig["dir"], t=time.time())
@@ -177,6 +182,14 @@ def commands():
                         reply(cid, f"⚪ لا فرصة قوية الآن (قوة {sig['score']}/100، "
                                    f"الاتجاه {'صاعد' if sig['dir'] == 1 else 'هابط'}). "
                                    "الأفضل الانتظار.")
+                elif text.startswith("/auto_on"):
+                    auto["on"] = True
+                    reply(cid, "✅ التوصيات التلقائية مفعّلة")
+                elif text.startswith("/auto_off"):
+                    auto["on"] = False
+                    reply(cid, "⏸️ التوصيات التلقائية متوقفة")
+                elif text.startswith("/status"):
+                    reply(cid, f"التلقائي: {'شغال' if auto['on'] else 'متوقف'}\nآخر فحص: {status['msg']}")
                 elif text.startswith("/start"):
                     reply(cid, "أهلاً! أرسل /tawsiya للحصول على تحليل الذهب الآن.")
         except Exception as e:
