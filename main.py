@@ -18,8 +18,9 @@ TOKEN = env("TELEGRAM_TOKEN", "BOT_TOKEN", "TOKEN", "TELEGRAM_BOT_TOKEN", "API_T
 CHAT = env("CHAT_ID", "TELEGRAM_CHAT_ID", "CHAT", "USER_ID")
 print(f"[startup] token set: {bool(TOKEN)} | chat id set: {bool(CHAT)}", flush=True)
 
-SYMBOL = "GC=F"                          # عقود الذهب (قريب من السبوت)
-MIN_SCORE = int(os.getenv("MIN_SCORE", "70"))
+SYMBOLS = ["XAUUSD=X", "GC=F"]           # سبوت أولاً، والعقود احتياطي (تُصحَّح بسعر السبوت)
+MIN_SCORE = int(os.getenv("MIN_SCORE", "85"))
+MAX_PER_DAY = 2                          # حد أقصى توصيتين باليوم
 CHECK_EVERY = 120                        # فحص كل دقيقتين
 COOLDOWN = 3600
 SESSION = (7, 20)                        # ساعات لندن + نيويورك (UTC) للتوصيات التلقائية
@@ -32,24 +33,66 @@ status = {"msg": "starting"}
 auto = {"on": True}
 active = {"sig": None, "t0": None, "be": False}
 _cache = {}
+used = {"sym": None}
+offset = {"auto": 0.0, "manual": 0.0}
+daily = {"d": None, "n": 0}
 
 
 # ---------------- بيانات ----------------
-def get(interval, period):
-    df = yf.download(SYMBOL, interval=interval, period=period,
-                     progress=False, auto_adjust=True)
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-    return df.dropna()
+def get_raw(interval, period):
+    for sym in SYMBOLS:
+        try:
+            df = yf.download(sym, interval=interval, period=period,
+                             progress=False, auto_adjust=True)
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+            df = df.dropna()
+            if len(df) >= 5:
+                used["sym"] = sym
+                return df
+        except Exception as e:
+            print(f"[data] {sym} {interval} error: {e}", flush=True)
+    raise RuntimeError("no price data")
 
 
 def get_cached(interval, period, ttl):
     k = (interval, period)
     if k in _cache and time.time() - _cache[k][0] < ttl:
         return _cache[k][1]
-    df = get(interval, period)
+    df = get_raw(interval, period)
     _cache[k] = (time.time(), df)
     return df
+
+
+def spot_price():
+    try:
+        r = requests.get("https://api.gold-api.com/price/XAU", timeout=8).json()
+        return float(r["price"])
+    except Exception:
+        return None
+
+
+def refresh_offset(raw_last):
+    """إذا اضطررنا لاستخدام العقود الآجلة نصحح الفرق بسعر السبوت الحي"""
+    if used["sym"] == "GC=F":
+        sp = spot_price()
+        if sp:
+            offset["auto"] = sp - raw_last
+    else:
+        offset["auto"] = 0.0
+
+
+def shift(df):
+    off = offset["auto"] + offset["manual"]
+    df = df.copy()
+    for k in ("Open", "High", "Low", "Close"):
+        df[k] = df[k] + off
+    return df
+
+
+def get(interval, period, ttl=0):
+    raw = get_cached(interval, period, ttl) if ttl else get_raw(interval, period)
+    return shift(raw)
 
 
 # ---------------- مؤشرات ----------------
@@ -199,18 +242,20 @@ def cycle(d1):
 
 # ---------------- التحليل الكامل ----------------
 def analyze():
-    d1 = get_cached("1d", "2y", 3600)
+    raw15 = get_raw("15m", "5d")
+    refresh_offset(float(raw15["Close"].iloc[-1]))
+    d1 = get("1d", "2y", 3600)
     h1 = get("1h", "60d")
     h4 = h1.resample("4h").agg({"Open": "first", "High": "max", "Low": "min",
                                 "Close": "last"}).dropna()
-    m15 = get("15m", "5d")
+    m15 = shift(raw15)
 
     price = float(m15["Close"].iloc[-1])
     t_d1, t_h4 = trend(d1), trend(h4)
     cyc = cycle(d1)
     hour = datetime.now(timezone.utc).hour
     r = {"price": price, "t_d1": t_d1, "t_h4": t_h4, "cycle": cyc["txt"],
-         "dir": None, "score": 0, "notes": [],
+         "dir": None, "score": 0, "notes": [], "missing": [], "elite": False,
          "in_session": SESSION[0] <= hour < SESSION[1]}
     if t_h4 == 0 or t_d1 == -t_h4:
         return r
@@ -272,11 +317,23 @@ def analyze():
         score += 10
         notes.append("نافذة دورة زمنية تدعم (+10)")
 
+    missing = []
+    if t_d1 != d:
+        missing.append("D1 لا يوافق الاتجاه")
+    if ax < 20:
+        missing.append("الاتجاه ضعيف أو السوق عرضي (ADX<20)")
+    if not (e4 == d or e1 == d or p4 == d or p1 == d):
+        missing.append("لا شمعة ابتلاع أو رفض على H1/H4")
+    if not (in_fib or lvl is not None or dist <= a):
+        missing.append("السعر ليس عند منطقة دخول (تصحيح/دعم/مقاومة)")
+
     sl_dist = 1.5 * a
     if lvl is not None:
         alt = abs(price - (lvl - d * 0.4 * a))
         sl_dist = min(max(alt, 1.0 * a), 2.2 * a)
-    r.update(dir=d, score=max(0, min(100, score)), notes=notes,
+    final = max(0, min(100, score))
+    r.update(dir=d, score=final, notes=notes, missing=missing,
+             elite=(final >= MIN_SCORE and not missing),
              entry=price, sl=price - d * sl_dist, sl0=price - d * sl_dist,
              tp=price + d * 2 * sl_dist, tp1=price + d * sl_dist, rr=2.0)
     return r
@@ -284,18 +341,22 @@ def analyze():
 
 def fmt(r, header="🥇 تحليل الذهب"):
     L = [header, f"💰 السعر: {r['price']:.2f}",
-         f"D1: {nm(r['t_d1'])} | H4: {nm(r['t_h4'])}"]
+         f"D1: {nm(r['t_d1'])} | H4: {nm(r['t_h4'])}",
+         f"(المصدر: {used['sym']} | تصحيح {offset['auto'] + offset['manual']:+.2f})"]
     if r["dir"] is None:
         L.append("⚪ لا توصية: لا اتجاه مشترك واضح")
     else:
         side = "شراء 🟢" if r["dir"] == 1 else "بيع 🔴"
-        if r["score"] >= MIN_SCORE:
-            L += [f"✅ توصية: {side}", f"الدخول: {r['entry']:.2f}",
+        if r["elite"]:
+            q = "استثنائية 💎" if r["score"] >= 95 else "ممتازة ⭐"
+            L += [f"✅ توصية {q}: {side}", f"الدخول: {r['entry']:.2f}",
                   f"وقف الخسارة: {r['sl']:.2f}",
                   f"الهدف 1 (انقل الوقف للتعادل): {r['tp1']:.2f}",
                   f"الهدف النهائي: {r['tp']:.2f} (ربح/خسارة 2:1)"]
         else:
-            L.append(f"⚪ لا فرصة قوية بعد ({side} محتمل)، الأفضل الانتظار")
+            L.append(f"⚪ لا فرصة ممتازة بعد ({side} محتمل)، الأفضل الانتظار")
+            if r["missing"]:
+                L.append("شروط ناقصة: " + "، ".join(r["missing"]))
         L.append(f"قوة الإشارة: {r['score']}/100")
         L += ["• " + n for n in r["notes"]]
     L.append(r["cycle"])
@@ -357,13 +418,17 @@ def loop():
             track()
             r = analyze()
             status["msg"] = f"سعر {r['price']:.2f} | قوة {r['score']}"
-            if (auto["on"] and r["dir"] and r["score"] >= MIN_SCORE and r["in_session"]
+            today = datetime.now(timezone.utc).date()
+            if daily["d"] != today:
+                daily.update(d=today, n=0)
+            if (auto["on"] and r["elite"] and r["in_session"] and daily["n"] < MAX_PER_DAY
                     and active["sig"] is None
                     and (r["dir"] != last["dir"] or time.time() - last["t"] > COOLDOWN)):
                 send(fmt(r, "🔔 توصية جديدة"))
                 now = pd.Timestamp.now(tz="UTC")
                 active.update(sig=r, t0=now, t0_orig=now, be=False)
                 last.update(dir=r["dir"], t=time.time())
+                daily["n"] += 1
         except Exception as e:
             status["msg"] = f"error: {e}"
             print(f"[loop] error: {e}", flush=True)
@@ -397,8 +462,25 @@ def commands():
                     reply(cid, "⏳ جاري التحليل...")
                     reply(cid, fmt(analyze()))
                 elif text.startswith("/price"):
-                    p = float(get("5m", "1d")["Close"].iloc[-1])
-                    reply(cid, f"💰 الذهب الآن: {p:.2f}")
+                    raw = get_raw("5m", "1d")
+                    refresh_offset(float(raw["Close"].iloc[-1]))
+                    p = float(shift(raw)["Close"].iloc[-1])
+                    reply(cid, f"💰 الذهب الآن: {p:.2f}\n(المصدر: {used['sym']})")
+                elif text.startswith("/calib"):
+                    parts = text.split()
+                    if len(parts) > 1 and parts[1] == "reset":
+                        offset["manual"] = 0.0
+                        reply(cid, "تم إلغاء المعايرة اليدوية")
+                    else:
+                        try:
+                            target = float(parts[1])
+                            raw = get_raw("5m", "1d")
+                            last_raw = float(raw["Close"].iloc[-1])
+                            refresh_offset(last_raw)
+                            offset["manual"] = target - (last_raw + offset["auto"])
+                            reply(cid, f"✅ تمت المعايرة على {target:.2f} (فرق {offset['manual']:+.2f})")
+                        except Exception:
+                            reply(cid, "اكتب السعر من منصتك هكذا: /calib 4193.50")
                 elif text.startswith("/auto_on"):
                     auto["on"] = True
                     reply(cid, "✅ التوصيات التلقائية مفعّلة (فحص كل دقيقتين)")
@@ -411,7 +493,7 @@ def commands():
                          f" | SL {s['sl']:.2f} | TP {s['tp']:.2f}") if s else "\nلا صفقة نشطة"
                     reply(cid, f"التلقائي: {'شغال' if auto['on'] else 'متوقف'}\nآخر فحص: {status['msg']}{t}")
                 elif text.startswith("/start"):
-                    reply(cid, "أهلاً! الأوامر:\n/tawsiya تحليل كامل\n/price السعر\n/auto_on /auto_off\n/status")
+                    reply(cid, "أهلاً! الأوامر:\n/tawsiya تحليل كامل\n/price السعر\n/calib 4193.5 معايرة السعر على منصتك\n/auto_on /auto_off\n/status")
         except Exception as e:
             status["msg"] = f"cmd error: {e}"
             print(f"[commands] error: {e}", flush=True)
