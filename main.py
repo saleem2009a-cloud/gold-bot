@@ -437,7 +437,11 @@ def evaluate(d1, h1, h4, m15, price, hour, mom=None,
     elif lvl is not None:
         sl_dist = min(max(abs(price - (lvl - d * 0.4 * a)), 1.0 * a), 2.2 * a)
     final = max(0, min(100, score))
-    r.update(dir=d, score=final, notes=notes, missing=missing, met=4 - len(missing),
+    fl = {"D1 يوافق": t_d1 == d, "ADX>=20": ax >= 20, "فيبو 38-62": bool(in_fib),
+          "قرب EMA21": dist <= a, "سعر ممتد": dist > 2 * a, "دعم/مقاومة": lvl is not None,
+          "ابتلاع H1/H4": (e4 == d or e1 == d), "Pin Bar": (p4 == d or p1 == d),
+          "كسر وهمي": bool(sw), "FVG": bool(fv), "OB": bool(ob), "دورة زمنية": cyc["support"] == d}
+    r.update(dir=d, score=final, notes=notes, missing=missing, met=4 - len(missing), flags=fl,
              elite=(final >= MIN_SCORE and not missing),
              sweep=sw, fvg=fv, ob=ob, candle=candle_txt,
              entry=price, sl=price - d * sl_dist, sl0=price - d * sl_dist,
@@ -458,6 +462,97 @@ def analyze():
            "2h": price - float(mc.iloc[-9])}
     hour = datetime.now(timezone.utc).hour
     return evaluate(d1, h1, h4, m15, price, hour, mom, london_orb(m15))
+
+
+# ---------------- تحسين مع تقسيم تدريب/اختبار ----------------
+def take(cands, pred, cool=6):
+    out, last = [], {1: -99, -1: -99}
+    for c in cands:
+        if not pred(c):
+            continue
+        if c["i"] - last[c["d"]] < cool:
+            continue
+        last[c["d"]] = c["i"]
+        out.append(c["R"])
+    return out
+
+
+def line(R):
+    if not R:
+        return "لا صفقات"
+    st = stats(R)
+    pf = "∞" if st["pf"] == float("inf") else f"{st['pf']:.2f}"
+    return f"{st['n']} صفقة | نجاح {st['win']:.0f}% | متوسط {st['avg']:+.2f}R | PF {pf}"
+
+
+def run_optimize(cid, days):
+    try:
+        reply(cid, f"⏳ بدأ اختبار العناصر ({days} يوم، تدريب/اختبار). ممكن ياخد 15-30 دقيقة، لا تعيد الأمر.")
+        raw = get_raw("1h", "730d")
+        idx = raw.index.tz_convert("UTC") if raw.index.tz is not None else raw.index.tz_localize("UTC")
+        n = len(raw)
+        start = max(300, n - int(days * 23))
+        cands = []
+        for i in range(start, n - 2, 2):
+            if not (SESSION[0] <= idx[i].hour < SESSION[1]):
+                continue
+            try:
+                w = raw.iloc[max(0, i - 1500):i + 1].copy()
+                o = float(w["Open"].iloc[-1])
+                for k in ("Open", "High", "Low", "Close"):
+                    w.iloc[-1, w.columns.get_loc(k)] = o
+                h4 = w.resample("4h").agg(OHLC).dropna()
+                d1 = w.resample("1D").agg(OHLC).dropna()
+                if len(d1) < 60 or len(h4) < 60:
+                    continue
+                r = evaluate(d1, w, h4, None, o, idx[i].hour, today=idx[i].date())
+                if not r["dir"]:
+                    continue
+                cands.append({"i": i, "d": r["dir"], "score": r["score"], "f": r["flags"],
+                              "R": simulate(raw, i, r["dir"], r["entry"], r["sl"], r["tp1"], r["tp"])})
+            except Exception:
+                pass
+        if len(cands) < 60:
+            reply(cid, f"عدد الإشارات قليل ({len(cands)}) لا يكفي للاختبار.")
+            return
+        mid = cands[len(cands) // 2]["i"]
+        tr = [c for c in cands if c["i"] < mid]
+        te = [c for c in cands if c["i"] >= mid]
+        L = [f"🔬 اختبار العناصر | {len(cands)} إشارة: تدريب {len(tr)} / اختبار {len(te)}",
+             "الأرقام = متوسط R للصفقات اللي فيها العنصر ناقص اللي ما فيها (الأكبر = أفضل).", ""]
+        good = []
+        for name in cands[0]["f"]:
+            row, ok = [], True
+            for part in (tr, te):
+                a = [c["R"] for c in part if c["f"][name]]
+                b = [c["R"] for c in part if not c["f"][name]]
+                if len(a) < 15 or len(b) < 15:
+                    row.append("قليل")
+                    ok = False
+                else:
+                    dlt = sum(a) / len(a) - sum(b) / len(b)
+                    row.append(f"{dlt:+.2f}")
+                    ok = ok and dlt > 0
+            tag = "✅" if ok else ("⚠️" if name == "سعر ممتد" else "▫️")
+            if ok and name != "سعر ممتد":
+                good.append(name)
+            L.append(f"{tag} {name}: تدريب {row[0]} | اختبار {row[1]}")
+        L += ["", "✅ = مفيد بالنصفين (احتمال حقيقي). ▫️ = غير ثابت (غالباً ضجيج).", ""]
+        base = lambda c: True
+        L.append("الأساس (كل الإشارات)، نصف الاختبار: " + line(take(te, base)))
+        L.append("الاستراتيجية الحالية (سكور≥70 + شروط)، نصف الاختبار: " + line(take(te, lambda c: c["score"] >= 70)))
+        for k in (2, 3):
+            if len(good) >= k:
+                rule = lambda c, k=k: sum(1 for g in good if c["f"][g]) >= k
+                L.append(f"قاعدة: {k}+ من العناصر المفيدة | تدريب: {line(take(tr, rule))}")
+                L.append(f"                            | اختبار: {line(take(te, rule))}")
+        L += ["", "العناصر المفيدة: " + ("، ".join(good) if good else "لا يوجد عنصر ثابت"),
+              "⚠️ العبرة بنصف الاختبار فقط (لم يُستخدم بالاختيار). إذا ما تحسّن فيه، فلا في ميزة حقيقية."]
+        reply(cid, "\n".join(L))
+    except Exception as e:
+        reply(cid, f"❌ فشل: {e}")
+    finally:
+        bt["running"] = False
 
 
 # ---------------- الذكاء الاصطناعي (Claude) ----------------
@@ -771,6 +866,17 @@ def commands():
                     else:
                         reply(cid, "🧠 جاري التفكير والبحث بالأخبار...")
                         reply(cid, ai_commentary(analyze()))
+                elif text.startswith("/optimize"):
+                    if bt["running"]:
+                        reply(cid, "اختبار شغال حالياً، انتظر النتيجة.")
+                    else:
+                        try:
+                            days = int(text.split()[1])
+                        except Exception:
+                            days = 365
+                        bt["running"] = True
+                        threading.Thread(target=run_optimize, args=(cid, min(max(days, 120), 700)),
+                                         daemon=True).start()
                 elif text.startswith("/backtest"):
                     if bt["running"]:
                         reply(cid, "الاختبار شغال حالياً، انتظر النتيجة.")
