@@ -1,5 +1,5 @@
-import os, time, threading
-from datetime import datetime, timezone
+import os, time, json, threading
+from datetime import datetime, timezone, timedelta
 import requests
 import pandas as pd
 import yfinance as yf
@@ -16,10 +16,12 @@ def env(*names):
 
 TOKEN = env("TELEGRAM_TOKEN", "BOT_TOKEN", "TOKEN", "TELEGRAM_BOT_TOKEN", "API_TOKEN")
 CHAT = env("CHAT_ID", "TELEGRAM_CHAT_ID", "CHAT", "USER_ID")
-print(f"[startup] token set: {bool(TOKEN)} | chat id set: {bool(CHAT)}", flush=True)
+ANTHROPIC_KEY = env("ANTHROPIC_API_KEY")
+AI_MODEL = os.getenv("AI_MODEL", "claude-sonnet-5-5")
+print(f"[startup] ai review: {bool(ANTHROPIC_KEY)} | token set: {bool(TOKEN)} | chat id set: {bool(CHAT)}", flush=True)
 
 SYMBOLS = ["XAUUSD=X", "GC=F"]           # سبوت أولاً، والعقود احتياطي (تُصحَّح بسعر السبوت)
-MIN_SCORE = int(os.getenv("MIN_SCORE", "85"))
+MIN_SCORE = int(os.getenv("MIN_SCORE", "80"))
 CHECK_EVERY = 120                        # فحص كل دقيقتين
 COOLDOWN = 3600
 SESSION = (7, 20)                        # ساعات لندن + نيويورك (UTC) للتوصيات التلقائية
@@ -35,9 +37,14 @@ _cache = {}
 used = {"sym": None}
 offset = {"auto": 0.0, "manual": 0.0}
 daily = {"d": None, "n": 0}
+ai_state = {"dir": None, "t": 0, "rejected": False}
+bt = {"running": False}
 
 
 # ---------------- بيانات ----------------
+OHLC = {"Open": "first", "High": "max", "Low": "min", "Close": "last"}
+
+
 def get_raw(interval, period):
     for sym in SYMBOLS:
         try:
@@ -206,7 +213,7 @@ def fib_zone(h4, d, price):
 
 
 # ---------------- الدورات الزمنية ----------------
-def cycle(d1):
+def cycle(d1, today=None):
     h, l = d1["High"], d1["Low"]
     w, n = 5, len(d1)
     sh = sl = None
@@ -217,7 +224,7 @@ def cycle(d1):
             sl = i
         if sh is not None and sl is not None:
             break
-    today = datetime.now(timezone.utc).date()
+    today = today or datetime.now(timezone.utc).date()
     res = {"support": 0, "txt": "⏳ الدورات: لا بيانات كافية"}
     lines, low_hit, high_hit = [], False, False
     if sl is not None:
@@ -239,23 +246,102 @@ def cycle(d1):
     return res
 
 
-# ---------------- التحليل الكامل ----------------
-def analyze():
-    raw15 = get_raw("15m", "5d")
-    refresh_offset(float(raw15["Close"].iloc[-1]))
-    d1 = get("1d", "2y", 3600)
-    h1 = get("1h", "60d")
-    h4 = h1.resample("4h").agg({"Open": "first", "High": "max", "Low": "min",
-                                "Close": "last"}).dropna()
-    m15 = shift(raw15)
+# ---------------- مفاهيم السيولة (SMC) ----------------
+def sweep(df, d, look=20, bars=2):
+    """كسر قاع/قمة وهمي: كسر مستوى سابق ثم إغلاق عكسي"""
+    n = len(df)
+    for k in range(2, 2 + bars):
+        i = n - k
+        if i - look < 0:
+            break
+        prior = df.iloc[i - look:i]
+        if d == 1:
+            lv = float(prior["Low"].min())
+            if float(df["Low"].iloc[i]) < lv < float(df["Close"].iloc[i]):
+                return True, float(df["Low"].iloc[i])
+        else:
+            lv = float(prior["High"].max())
+            if float(df["High"].iloc[i]) > lv > float(df["Close"].iloc[i]):
+                return True, float(df["High"].iloc[i])
+    return False, None
 
-    price = float(m15["Close"].iloc[-1])
+
+def fvg(df, d, price, a, look=40):
+    """فجوة القيمة العادلة (3 شموع) غير ممتلئة والسعر داخلها أو قربها"""
+    n, H, L = len(df), df["High"], df["Low"]
+    for i in range(n - 2, max(n - look, 2), -1):
+        if d == 1 and float(L.iloc[i]) > float(H.iloc[i - 2]):
+            bot, top = float(H.iloc[i - 2]), float(L.iloc[i])
+            if top - bot < 0.3 * a or float(L.iloc[i + 1:].min()) <= bot:
+                continue
+            if bot - 0.3 * a <= price <= top + 0.3 * a:
+                return "فوري" if bot <= price <= top else "قريب"
+        if d == -1 and float(H.iloc[i]) < float(L.iloc[i - 2]):
+            top, bot = float(L.iloc[i - 2]), float(H.iloc[i])
+            if top - bot < 0.3 * a or float(H.iloc[i + 1:].max()) >= top:
+                continue
+            if bot - 0.3 * a <= price <= top + 0.3 * a:
+                return "فوري" if bot <= price <= top else "قريب"
+    return None
+
+
+def order_block(df, d, price, a, look=40):
+    """بلوك الأوامر: آخر شمعة عكسية قبل اندفاع قوي، والسعر يعيد اختبارها"""
+    n = len(df)
+    O, C, H, L = df["Open"], df["Close"], df["High"], df["Low"]
+    for i in range(n - 5, max(n - look, 0), -1):
+        nxt = df.iloc[i + 1:i + 4]
+        lo, hi = float(L.iloc[i]), float(H.iloc[i])
+        if d == 1 and C.iloc[i] < O.iloc[i]:
+            if (float(nxt["High"].max()) - lo >= 2 * a and float(nxt["Close"].max()) > hi
+                    and float(C.iloc[i + 4:].min()) >= lo
+                    and lo - 0.3 * a <= price <= hi + 0.3 * a):
+                return True
+        if d == -1 and C.iloc[i] > O.iloc[i]:
+            if (hi - float(nxt["Low"].min()) >= 2 * a and float(nxt["Close"].min()) < lo
+                    and float(C.iloc[i + 4:].max()) <= hi
+                    and lo - 0.3 * a <= price <= hi + 0.3 * a):
+                return True
+    return False
+
+
+def london_orb(m15):
+    """نطاق أول 30 دقيقة من افتتاح لندن (08:00 بتوقيت لندن)"""
+    nowu = datetime.now(timezone.utc)
+    try:
+        from zoneinfo import ZoneInfo
+        op = datetime.now(ZoneInfo("Europe/London")).replace(
+            hour=8, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
+    except Exception:
+        op = nowu.replace(hour=7, minute=0, second=0, microsecond=0)
+    if nowu < op + timedelta(minutes=30):
+        return "pre", "قبل الافتتاح أو لا بيانات"
+    if nowu > op + timedelta(hours=8):
+        return "ended", "انتهت جلسة لندن"
+    idx = m15.index
+    idx = idx.tz_convert("UTC") if idx.tz is not None else idx.tz_localize("UTC")
+    rng = m15[(idx >= op) & (idx < op + timedelta(minutes=30))]
+    if rng.empty:
+        return "nodata", "لا بيانات"
+    hi, lo = float(rng["High"].max()), float(rng["Low"].min())
+    c = float(m15["Close"].iloc[-2])
+    if c > hi:
+        return 1, f"اختراق صاعد ↑ ({hi:.1f})"
+    if c < lo:
+        return -1, f"اختراق هابط ↓ ({lo:.1f})"
+    return 0, f"داخل النطاق {lo:.1f}-{hi:.1f}"
+
+
+# ---------------- التحليل الكامل ----------------
+def evaluate(d1, h1, h4, m15, price, hour, mom=None,
+             orb=("pre", "قبل الافتتاح أو لا بيانات"), today=None):
+    orb_state, orb_txt = orb
+    mom = mom or {"15": 0.0, "1h": 0.0, "2h": 0.0}
     t_d1, t_h4 = trend(d1), trend(h4)
-    cyc = cycle(d1)
-    hour = datetime.now(timezone.utc).hour
-    r = {"price": price, "t_d1": t_d1, "t_h4": t_h4, "cycle": cyc["txt"],
-         "dir": None, "score": 0, "notes": [], "missing": [], "elite": False,
-         "in_session": SESSION[0] <= hour < SESSION[1]}
+    cyc = cycle(d1, today)
+    r = {"price": price, "t_d1": t_d1, "t_h4": t_h4, "cycle": cyc["txt"], "mom": mom,
+         "orb": orb_txt, "dir": None, "score": 0, "notes": [], "missing": [],
+         "met": 0, "elite": False, "in_session": SESSION[0] <= hour < SESSION[1]}
     if t_h4 == 0 or t_d1 == -t_h4:
         return r
 
@@ -268,6 +354,7 @@ def analyze():
 
     c = h1["Close"]
     a = float(atr(h1).iloc[-2])
+    am = float(atr(m15).iloc[-2]) if m15 is not None else a
     ax = float(adx(h1).iloc[-2])
     if ax >= 20:
         score += 10
@@ -283,82 +370,273 @@ def analyze():
 
     in_fib = fib_zone(h4, d, price)
     dist = abs(price - float(e21.iloc[-2]))
+    lvl = near_level(h1, d, price, a)
     if in_fib or dist <= a:
-        score += 15
-        notes.append("منطقة تصحيح (فيبو 38-62% أو EMA21) (+15)")
+        score += 10
+        notes.append("منطقة تصحيح (فيبو 38-62% أو EMA21) (+10)")
     elif dist > 2 * a:
         score -= 15
         notes.append("السعر ممتد، خطر مطاردة (-15)")
-
-    lvl = near_level(h1, d, price, a)
     if lvl is not None:
-        score += 10
-        notes.append(f"قرب {'دعم' if d == 1 else 'مقاومة'} {lvl:.2f} (+10)")
-
-    e4, e1, em = engulf(h4), engulf(h1), engulf(m15)
-    p4, p1 = pinbar(h4), pinbar(h1)
-    if e4 == d or e1 == d:
-        score += 15
-        notes.append(f"ابتلاع {kind} H4/H1 (+15)")
-    elif p4 == d or p1 == d:
-        score += 10
-        notes.append(f"شمعة رفض (Pin Bar) {kind} (+10)")
-    elif em == d:
-        score += 8
-        notes.append(f"ابتلاع {kind} M15 (+8)")
-
-    mh = macd_hist(c)
-    if (mh.iloc[-2] > mh.iloc[-3]) == (d == 1):
         score += 5
-        notes.append("زخم MACD يدعم (+5)")
+        notes.append(f"قرب {'دعم' if d == 1 else 'مقاومة'} {lvl:.2f} (+5)")
 
-    if cyc["support"] == d:
+    e4, e1 = engulf(h4), engulf(h1)
+    em = engulf(m15) if m15 is not None else 0
+    p4, p1 = pinbar(h4), pinbar(h1)
+    candle_txt = "لا ابتلاع"
+    if e4 == d or e1 == d:
         score += 10
-        notes.append("نافذة دورة زمنية تدعم (+10)")
+        candle_txt = f"ابتلاع {kind} {'H4' if e4 == d else 'H1'}"
+        notes.append(f"{candle_txt} (+10)")
+    elif p4 == d or p1 == d:
+        score += 7
+        candle_txt = f"شمعة رفض (Pin Bar) {kind}"
+        notes.append(f"{candle_txt} (+7)")
+    elif em == d:
+        score += 5
+        candle_txt = f"ابتلاع {kind} M15"
+        notes.append(f"{candle_txt} (+5)")
+
+    sw, sw_ext = sweep(h1, d, 20, 2)
+    if not sw and m15 is not None:
+        sw, sw_ext = sweep(m15, d, 24, 4)
+    if sw:
+        score += 10
+        notes.append(f"{'كسر قاع وهمي' if d == 1 else 'كسر قمة وهمي'} (+10)")
+
+    fv = (fvg(m15, d, price, am) if m15 is not None else None) or fvg(h1, d, price, a)
+    if fv:
+        score += 5
+        notes.append(f"FVG {fv} (+5)")
+    ob = order_block(h1, d, price, a) or (order_block(m15, d, price, am) if m15 is not None else False)
+    if ob:
+        score += 5
+        notes.append("بلوك أوامر OB (+5)")
+    if orb_state == d:
+        score += 5
+        notes.append("اختراق نطاق لندن باتجاه الصفقة (+5)")
+    if cyc["support"] == d:
+        score += 5
+        notes.append("نافذة دورة زمنية تدعم (+5)")
 
     missing = []
     if t_d1 != d:
         missing.append("D1 لا يوافق الاتجاه")
     if ax < 20:
-        missing.append("الاتجاه ضعيف أو السوق عرضي (ADX<20)")
-    if not (e4 == d or e1 == d or p4 == d or p1 == d):
-        missing.append("لا شمعة ابتلاع أو رفض على H1/H4")
-    if not (in_fib or lvl is not None or dist <= a):
-        missing.append("السعر ليس عند منطقة دخول (تصحيح/دعم/مقاومة)")
+        missing.append("الاتجاه ضعيف أو السوق عرضي")
+    if not (e4 == d or e1 == d or p4 == d or p1 == d or sw):
+        missing.append("لا ابتلاع/رفض/كسر وهمي")
+    if not (in_fib or lvl is not None or dist <= a or fv or ob):
+        missing.append("السعر ليس عند منطقة دخول")
 
     sl_dist = 1.5 * a
-    if lvl is not None:
-        alt = abs(price - (lvl - d * 0.4 * a))
-        sl_dist = min(max(alt, 1.0 * a), 2.2 * a)
+    if sw and sw_ext is not None:
+        sl_dist = min(max(abs(price - (sw_ext - d * 0.3 * a)), 1.0 * a), 2.5 * a)
+    elif lvl is not None:
+        sl_dist = min(max(abs(price - (lvl - d * 0.4 * a)), 1.0 * a), 2.2 * a)
     final = max(0, min(100, score))
-    r.update(dir=d, score=final, notes=notes, missing=missing,
+    r.update(dir=d, score=final, notes=notes, missing=missing, met=4 - len(missing),
              elite=(final >= MIN_SCORE and not missing),
+             sweep=sw, fvg=fv, ob=ob, candle=candle_txt,
              entry=price, sl=price - d * sl_dist, sl0=price - d * sl_dist,
              tp=price + d * 2 * sl_dist, tp1=price + d * sl_dist, rr=2.0)
     return r
 
 
-def fmt(r, header="🥇 تحليل الذهب"):
-    L = [header, f"💰 السعر: {r['price']:.2f}",
+def analyze():
+    raw15 = get_raw("15m", "5d")
+    refresh_offset(float(raw15["Close"].iloc[-1]))
+    d1 = get("1d", "2y", 3600)
+    h1 = get("1h", "60d")
+    h4 = h1.resample("4h").agg(OHLC).dropna()
+    m15 = shift(raw15)
+    price = float(m15["Close"].iloc[-1])
+    mc = m15["Close"]
+    mom = {"15": price - float(mc.iloc[-2]), "1h": price - float(mc.iloc[-5]),
+           "2h": price - float(mc.iloc[-9])}
+    hour = datetime.now(timezone.utc).hour
+    return evaluate(d1, h1, h4, m15, price, hour, mom, london_orb(m15))
+
+
+# ---------------- الذكاء الاصطناعي (Claude) ----------------
+def call_claude(prompt, max_tokens=700, search=True):
+    if not ANTHROPIC_KEY:
+        return None
+    hdr = {"x-api-key": ANTHROPIC_KEY, "anthropic-version": "2023-06-01",
+           "content-type": "application/json"}
+    body = {"model": AI_MODEL, "max_tokens": max_tokens,
+            "messages": [{"role": "user", "content": prompt}]}
+    if search:
+        body["tools"] = [{"type": "web_search_20250305", "name": "web_search", "max_uses": 2}]
+    for _ in range(2):
+        try:
+            resp = requests.post("https://api.anthropic.com/v1/messages",
+                                 headers=hdr, json=body, timeout=90)
+            if resp.status_code == 200:
+                return "".join(b.get("text", "") for b in resp.json().get("content", [])
+                               if b.get("type") == "text").strip()
+            print(f"[ai] {resp.status_code} {resp.text[:200]}", flush=True)
+            if "tools" in body:
+                body.pop("tools")      # أعد المحاولة بدون بحث الويب
+                continue
+            return None
+        except Exception as e:
+            print(f"[ai] error: {e}", flush=True)
+            return None
+    return None
+
+
+def brief(r):
+    m = r["mom"]
+    t = (f"الوقت UTC: {datetime.now(timezone.utc):%Y-%m-%d %H:%M}\n"
+         f"سعر الذهب: {r['price']:.2f}\nD1: {nm(r['t_d1'])} | H4: {nm(r['t_h4'])}\n"
+         f"زخم 15د/1س/2س: {m['15']:+.1f}/{m['1h']:+.1f}/{m['2h']:+.1f}$\n")
+    if r["dir"]:
+        side = "شراء" if r["dir"] == 1 else "بيع"
+        t += (f"الإشارة: {side} | سكور {r['score']}/100 | شروط ناقصة: {', '.join(r['missing']) or 'لا'}\n"
+              f"دخول {r['entry']:.2f} | وقف {r['sl']:.2f} | هدف1 {r['tp1']:.2f} | هدف2 {r['tp']:.2f}\n"
+              f"التفاصيل: {'; '.join(r['notes'])}\n")
+    return t + r["cycle"]
+
+
+def ai_review(r):
+    prompt = ("أنت مدير مخاطر خبير في الذهب XAUUSD. راجع هذه الإشارة الآلية.\n\n" + brief(r) +
+              "\n\nابحث بسرعة عن أخبار الذهب اليوم وأي حدث أمريكي عالي التأثير (CPI, NFP, FOMC, خطابات الفيدرالي) "
+              "خلال الساعات الست القادمة وأي حدث جيوسياسي كبير. ارفض الإشارة إذا كان هناك خبر وشيك أو سياق "
+              "كلي يعاكسها بوضوح. أجب فقط بـ JSON بدون أي نص آخر:\n"
+              '{"verdict":"approve" أو "reject","confidence":0-100,"reason":"جملة عربية قصيرة"}')
+    txt = call_claude(prompt, 500)
+    if not txt:
+        return None
+    try:
+        j = json.loads(txt[txt.index("{"):txt.rindex("}") + 1])
+        v = str(j.get("verdict", "")).lower()
+        return {"verdict": "approve" if v.startswith("approve") else "reject",
+                "confidence": int(j.get("confidence", 0)),
+                "reason": str(j.get("reason", ""))[:200]}
+    except Exception:
+        return None
+
+
+def ai_commentary(r):
+    prompt = ("أنت محلل ذهب خبير. هذه قراءة البوت الآلية الآن:\n\n" + brief(r) +
+              "\n\nابحث عن أخبار الذهب والأحداث الاقتصادية المهمة اليوم، ثم اكتب قراءة سوق مختصرة بالعربية "
+              "(حتى 10 أسطر): الصورة العامة، ما الذي يجب انتظاره، مستويات الشراء/البيع المهمة، وأهم المخاطر. "
+              "لا تضمن أرباحاً.")
+    return call_claude(prompt, 800) or "تعذر الاتصال بالذكاء الاصطناعي (تأكد من ANTHROPIC_API_KEY)."
+
+
+# ---------------- اختبار تاريخي ----------------
+def simulate(raw, i, d, entry, sl, tp1, tp, maxbars=24):
+    n, risk, be, stop = len(raw), abs(entry - sl), False, sl
+    end = min(i + maxbars, n)
+    for j in range(i, end):
+        hi, lo = float(raw["High"].iloc[j]), float(raw["Low"].iloc[j])
+        if (lo <= stop) if d == 1 else (hi >= stop):
+            return 0.0 if be else -1.0
+        if (hi >= tp) if d == 1 else (lo <= tp):
+            return 2.0
+        if not be and ((hi >= tp1) if d == 1 else (lo <= tp1)):
+            be, stop = True, entry
+    return (float(raw["Close"].iloc[end - 1]) - entry) * d / risk
+
+
+def stats(R):
+    n = len(R)
+    gp = sum(x for x in R if x > 0)
+    gl = -sum(x for x in R if x < 0)
+    eq = peak = dd = 0.0
+    for x in R:
+        eq += x
+        peak = max(peak, eq)
+        dd = max(dd, peak - eq)
+    return {"n": n, "win": 100 * sum(1 for x in R if x > 0) / n, "avg": sum(R) / n,
+            "tot": sum(R), "pf": (gp / gl if gl > 0 else float("inf")), "dd": dd}
+
+
+def run_backtest(cid, days):
+    try:
+        reply(cid, f"⏳ بدأ الاختبار التاريخي ({days} يوم). ممكن ياخد عدة دقائق على السيرفر المجاني...")
+        raw = get_raw("1h", "730d")
+        idx = raw.index.tz_convert("UTC") if raw.index.tz is not None else raw.index.tz_localize("UTC")
+        n = len(raw)
+        start = max(300, n - int(days * 23))
+        cands, last_i, errs = [], {1: -99, -1: -99}, 0
+        for i in range(start, n - 2):
+            if not (SESSION[0] <= idx[i].hour < SESSION[1]):
+                continue
+            try:
+                w = raw.iloc[max(0, i - 1500):i + 1].copy()
+                o = float(w["Open"].iloc[-1])
+                for k in ("Open", "High", "Low", "Close"):
+                    w.iloc[-1, w.columns.get_loc(k)] = o     # الشمعة الحالية لم تُغلق بعد
+                h4 = w.resample("4h").agg(OHLC).dropna()
+                d1 = w.resample("1D").agg(OHLC).dropna()
+                if len(d1) < 60 or len(h4) < 60:
+                    continue
+                r = evaluate(d1, w, h4, None, o, idx[i].hour, today=idx[i].date())
+                if not r["dir"] or r["missing"] or r["score"] < 60:
+                    continue
+                d = r["dir"]
+                if i - last_i[d] < 6:
+                    continue
+                last_i[d] = i
+                cands.append((r["score"], simulate(raw, i, d, r["entry"], r["sl"], r["tp1"], r["tp"])))
+            except Exception:
+                errs += 1
+        L = [f"📊 اختبار تاريخي: آخر {days} يوم على H1 (سبوت)",
+             "⚠️ تقريبي: بدون مؤشرات M15 (ORB وغيرها)، والوقف/الهدف بالـR (1R = مسافة الوقف).", ""]
+        for th in (60, 70, 80, 90):
+            R = [x for sc, x in cands if sc >= th]
+            if not R:
+                L.append(f"سكور ≥{th}: لا صفقات")
+                continue
+            st = stats(R)
+            pf = "∞" if st["pf"] == float("inf") else f"{st['pf']:.2f}"
+            L.append(f"سكور ≥{th}: {st['n']} صفقة | نجاح {st['win']:.0f}% | متوسط {st['avg']:+.2f}R | "
+                     f"المجموع {st['tot']:+.1f}R | PF {pf} | أقصى هبوط {st['dd']:.1f}R")
+        L += ["", "كيف تقرأها: الاستراتيجية تستحق الثقة فقط إذا كان المتوسط موجباً وPF أكبر من 1.3 "
+                  "وعدد الصفقات 30 أو أكثر. أقل من ذلك = عينة صغيرة لا يعتمد عليها."]
+        reply(cid, "\n".join(L))
+    except Exception as e:
+        reply(cid, f"❌ فشل الاختبار: {e}")
+    finally:
+        bt["running"] = False
+
+
+def fmt(r, header="تحليل الذهب", full=False):
+    m = r["mom"]
+    L = [f"🚨 {header} 🚨", f"💰 السعر: {r['price']:.2f}",
          f"D1: {nm(r['t_d1'])} | H4: {nm(r['t_h4'])}",
-         f"(المصدر: {used['sym']} | تصحيح {offset['auto'] + offset['manual']:+.2f})"]
+         f"⚡ 15د: {m['15']:+.1f}$ | 1س: {m['1h']:+.1f}$ | 2س: {m['2h']:+.1f}$"]
     if r["dir"] is None:
         L.append("⚪ لا توصية: لا اتجاه مشترك واضح")
     else:
-        side = "شراء 🟢" if r["dir"] == 1 else "بيع 🔴"
+        side = "بيع 🔴" if r["dir"] == -1 else "شراء 🟢"
+        L.append(f"{side} | سكور {r['score']}/100 | شروط {r['met']}/4")
+        sw_name = "كسر قاع وهمي" if r["dir"] == 1 else "كسر قمة وهمي"
+        L += [f"{'🟢' if r['sweep'] else '⚪'} {sw_name if r['sweep'] else 'لا كسر وهمي'}"
+              f" | OB: {'نعم' if r['ob'] else 'لا'} | FVG: {r['fvg'] or 'لا'}",
+              f"🕯️ {r['candle']}", f"🏦 ORB لندن: {r['orb']}"]
         if r["elite"]:
             q = "استثنائية 💎" if r["score"] >= 95 else "ممتازة ⭐"
-            L += [f"✅ توصية {q}: {side}", f"الدخول: {r['entry']:.2f}",
-                  f"وقف الخسارة: {r['sl']:.2f}",
-                  f"الهدف 1 (انقل الوقف للتعادل): {r['tp1']:.2f}",
-                  f"الهدف النهائي: {r['tp']:.2f} (ربح/خسارة 2:1)"]
+            L += [f"✅ توصية {q}",
+                  f"🎯 الدخول: {r['entry']:.2f}", f"🛑 الوقف: {r['sl']:.2f}",
+                  f"✅ الهدف 1 (انقل الوقف للتعادل): {r['tp1']:.2f}",
+                  f"💰 الهدف 2: {r['tp']:.2f} (2:1)"]
         else:
-            L.append(f"⚪ لا فرصة ممتازة بعد ({side} محتمل)، الأفضل الانتظار")
+            L.append(f"⚪ لا فرصة ممتازة بعد ({side.split()[0]} محتمل)، الأفضل الانتظار")
             if r["missing"]:
                 L.append("شروط ناقصة: " + "، ".join(r["missing"]))
-        L.append(f"قوة الإشارة: {r['score']}/100")
-        L += ["• " + n for n in r["notes"]]
-    L.append(r["cycle"])
+        if r.get("ai"):
+            ai = r["ai"]
+            L.append(f"🧠 مراجعة ذكية: {'موافقة ✅' if ai['verdict'] == 'approve' else 'رفض ❌'}"
+                     f" (ثقة {ai['confidence']}%) — {ai['reason']}")
+        if full:
+            L += ["• " + n for n in r["notes"]]
+    if full:
+        L.append(r["cycle"])
     if not r["in_session"]:
         L.append("🕒 خارج جلسة لندن/نيويورك: سيولة أقل")
     L.append("⚠️ تحليل آلي وليس توصية مالية. خاطر بأقل من 1% من الرصيد.")
@@ -417,17 +695,27 @@ def loop():
             track()
             r = analyze()
             status["msg"] = f"سعر {r['price']:.2f} | قوة {r['score']}"
-            today = datetime.now(timezone.utc).date()
-            if daily["d"] != today:
-                daily.update(d=today, n=0)
-            if (auto["on"] and r["elite"] and r["in_session"]
-                    and active["sig"] is None
+            if (auto["on"] and r["elite"] and r["in_session"] and active["sig"] is None
                     and (r["dir"] != last["dir"] or time.time() - last["t"] > COOLDOWN)):
-                send(fmt(r, "🔔 توصية جديدة"))
-                now = pd.Timestamp.now(tz="UTC")
-                active.update(sig=r, t0=now, t0_orig=now, be=False)
-                last.update(dir=r["dir"], t=time.time())
-                daily["n"] += 1
+                go = True
+                if ANTHROPIC_KEY:
+                    if (ai_state["rejected"] and ai_state["dir"] == r["dir"]
+                            and time.time() - ai_state["t"] < 1800):
+                        go = False                      # رُفضت قبل قليل، لا تكرر المراجعة
+                    else:
+                        rev = ai_review(r)
+                        rej = bool(rev and rev["verdict"] == "reject")
+                        ai_state.update(dir=r["dir"], t=time.time(), rejected=rej)
+                        if rej:
+                            go = False
+                            side = "شراء" if r["dir"] == 1 else "بيع"
+                            send(f"🧠 المراجعة الذكية رفضت إشارة {side} عند {r['price']:.2f}: {rev['reason']}")
+                        r["ai"] = rev
+                if go:
+                    send(fmt(r, "توصية جديدة"))
+                    now = pd.Timestamp.now(tz="UTC")
+                    active.update(sig=r, t0=now, t0_orig=now, be=False)
+                    last.update(dir=r["dir"], t=time.time())
         except Exception as e:
             status["msg"] = f"error: {e}"
             print(f"[loop] error: {e}", flush=True)
@@ -459,7 +747,27 @@ def commands():
                 print(f"[commands] got: {text}", flush=True)
                 if text.startswith("/tawsiya"):
                     reply(cid, "⏳ جاري التحليل...")
-                    reply(cid, fmt(analyze()))
+                    rr = analyze()
+                    if rr["elite"] and ANTHROPIC_KEY:
+                        rr["ai"] = ai_review(rr)
+                    reply(cid, fmt(rr, full=True))
+                elif text.startswith("/ai"):
+                    if not ANTHROPIC_KEY:
+                        reply(cid, "أضف ANTHROPIC_API_KEY في Environment على Render لتفعيل العقل الذكي.")
+                    else:
+                        reply(cid, "🧠 جاري التفكير والبحث بالأخبار...")
+                        reply(cid, ai_commentary(analyze()))
+                elif text.startswith("/backtest"):
+                    if bt["running"]:
+                        reply(cid, "الاختبار شغال حالياً، انتظر النتيجة.")
+                    else:
+                        try:
+                            days = int(text.split()[1])
+                        except Exception:
+                            days = 180
+                        bt["running"] = True
+                        threading.Thread(target=run_backtest, args=(cid, min(max(days, 30), 600)),
+                                         daemon=True).start()
                 elif text.startswith("/price"):
                     raw = get_raw("5m", "1d")
                     refresh_offset(float(raw["Close"].iloc[-1]))
@@ -492,7 +800,7 @@ def commands():
                          f" | SL {s['sl']:.2f} | TP {s['tp']:.2f}") if s else "\nلا صفقة نشطة"
                     reply(cid, f"التلقائي: {'شغال' if auto['on'] else 'متوقف'}\nآخر فحص: {status['msg']}{t}")
                 elif text.startswith("/start"):
-                    reply(cid, "أهلاً! الأوامر:\n/tawsiya تحليل كامل\n/price السعر\n/calib 4193.5 معايرة السعر على منصتك\n/auto_on /auto_off\n/status")
+                    reply(cid, "أهلاً! الأوامر:\n/tawsiya تحليل كامل\n/price السعر\n/ai قراءة السوق بالذكاء الاصطناعي مع الأخبار\n/backtest 180 اختبار الاستراتيجية على التاريخ\n/calib 4193.5 معايرة السعر على منصتك\n/auto_on /auto_off\n/status")
         except Exception as e:
             status["msg"] = f"cmd error: {e}"
             print(f"[commands] error: {e}", flush=True)
