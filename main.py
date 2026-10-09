@@ -110,18 +110,64 @@ def loop():
             status["msg"] = info
             if sig and sig["score"] >= MIN_SCORE:
                 if sig["dir"] != last["dir"] or time.time() - last["t"] > COOLDOWN:
-                    side = "شراء 🟢" if sig["dir"] == 1 else "بيع 🔴"
-                    send(f"🥇 توصية ذهب: {side}\n"
-                         f"الدخول: {sig['entry']:.2f}\n"
-                         f"وقف الخسارة: {sig['sl']:.2f}\n"
-                         f"الهدف: {sig['tp']:.2f}\n"
-                         f"نسبة ربح/خسارة: {sig['rr']:.1f}\n"
-                         f"قوة الإشارة: {sig['score']}/100\n"
-                         f"⚠️ تحليل آلي وليس توصية مالية. خاطر بأقل من 1% من الرصيد.")
+                    send(fmt(sig))
                     last.update(dir=sig["dir"], t=time.time())
         except Exception as e:
             status["msg"] = f"error: {e}"
         time.sleep(CHECK_EVERY)
+
+
+def fmt(sig):
+    side = "شراء 🟢" if sig["dir"] == 1 else "بيع 🔴"
+    return (f"🥇 توصية ذهب: {side}\n"
+            f"الدخول: {sig['entry']:.2f}\n"
+            f"وقف الخسارة: {sig['sl']:.2f}\n"
+            f"الهدف: {sig['tp']:.2f}\n"
+            f"نسبة ربح/خسارة: {sig['rr']:.1f}\n"
+            f"قوة الإشارة: {sig['score']}/100\n"
+            f"⚠️ تحليل آلي وليس توصية مالية. خاطر بأقل من 1% من الرصيد.")
+
+
+def reply(chat_id, text):
+    requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage",
+                  data={"chat_id": chat_id, "text": text}, timeout=15)
+
+
+def commands():
+    if not TOKEN:
+        return
+    try:
+        requests.get(f"https://api.telegram.org/bot{TOKEN}/deleteWebhook", timeout=15)
+    except Exception:
+        pass
+    offset = 0
+    while True:
+        try:
+            r = requests.get(f"https://api.telegram.org/bot{TOKEN}/getUpdates",
+                             params={"offset": offset, "timeout": 30}, timeout=40).json()
+            for u in r.get("result", []):
+                offset = u["update_id"] + 1
+                msg = u.get("message") or {}
+                text = (msg.get("text") or "").strip().lower()
+                cid = msg.get("chat", {}).get("id")
+                if not cid:
+                    continue
+                if text.startswith("/tawsiya"):
+                    reply(cid, "⏳ جاري التحليل...")
+                    sig, info = analyze()
+                    if sig is None:
+                        reply(cid, f"⚪ لا توصية الآن: {info}")
+                    elif sig["score"] >= MIN_SCORE:
+                        reply(cid, fmt(sig))
+                    else:
+                        reply(cid, f"⚪ لا فرصة قوية الآن (قوة {sig['score']}/100، "
+                                   f"الاتجاه {'صاعد' if sig['dir'] == 1 else 'هابط'}). "
+                                   "الأفضل الانتظار.")
+                elif text.startswith("/start"):
+                    reply(cid, "أهلاً! أرسل /tawsiya للحصول على تحليل الذهب الآن.")
+        except Exception as e:
+            status["msg"] = f"cmd error: {e}"
+            time.sleep(5)
 
 
 @app.route("/")
@@ -130,6 +176,7 @@ def home():
 
 
 threading.Thread(target=loop, daemon=True).start()
+threading.Thread(target=commands, daemon=True).start()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "10000")))
