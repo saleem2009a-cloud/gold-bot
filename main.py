@@ -1,48 +1,51 @@
-// @version=5
-indicator("GOLD V70.9 Early+Confirmed", overlay=true)
+# main.py - GOLD V70.9 Python for Render
+import time
+import os
 
-// === ER ===
-len = 14
-chg = math.abs(close - close[len])
-vol = math.sum(math.abs(ta.change(close)), len)
-er = vol > 0? chg / vol : 0
+print("V70.9 Python شغال...")
 
-// === OF مبسط ===
-of_raw = (close - open) / (high - low + 0.0001) * 100
-of_ma = ta.sma(of_raw, 10)
+def calculate_er(prices, period=14):
+    if len(prices) < period + 1:
+        return 0
+    change = abs(prices[-1] - prices[-(period+1)])
+    vol = sum(abs(prices[i] - prices[i-1]) for i in range(-period, 0))
+    return change / vol if vol > 0 else 0
 
-// === توافق - بدون security معقد ===
-m15_diff = close - close[3]
-h1_diff = close - close[12]
-h2_diff = close - close[24]
-agreeBuy = (m15_diff > 0? 1 : 0) + (h1_diff > 0? 1 : 0) + (h2_diff > 0? 1 : 0)
-agreeSell = (m15_diff < 0? 1 : 0) + (h1_diff < 0? 1 : 0) + (h2_diff < 0? 1 : 0)
+# تخزين اسعار وهمي للتجربة - انت بدلو ب API تبعك
+prices = [4150, 4152, 4155, 4158, 4162, 4168, 4171, 4174, 4176]
+of_values = [50, 55, 60, 62, 64, 58, 60, 65]
 
-// === ابتلاع ===
-bullEng = close > open and close[1] < open[1] and close > open[1] and open < close[1]
-bearEng = close < open and close[1] > open[1] and close < open[1] and open > close[1]
+er = calculate_er(prices)
+of_ma = sum(of_values[-10:]) / len(of_values)
 
-// === شروط V70.9 ===
-earlyBuyCond = er > 0.28 and er < 0.45 and of_ma > 55 and agreeBuy >= 2 and er > er[1]
-confirmedBuyCond = er >= 0.40 and of_ma > 50 and agreeBuy >= 3 and bullEng and h2_diff < 20
+m15 = prices[-1] - prices[-4] if len(prices) >=4 else 0
+h1 = prices[-1] - prices[-8] if len(prices) >=8 else 0
+h2 = prices[-1] - prices[-16] if len(prices) >=16 else 0
 
-earlySellCond = er > 0.28 and er < 0.45 and of_ma < -55 and agreeSell >= 2 and er > er[1]
-confirmedSellCond = er >= 0.40 and of_ma < -50 and agreeSell >= 3 and bearEng and h2_diff > -20
+agree = (1 if m15>0 else 0) + (1 if h1>0 else 0) + (1 if h2>0 else 0)
 
-// === رسم ===
-plotshape(earlyBuyCond, title="تنبيه مبكر شراء 6/10", style=shape.triangleup, location=location.belowbar, color=color.new(color.yellow, 0), size=size.small, text="⚠️6/10 شراء")
-plotshape(confirmedBuyCond, title="شراء مؤكد 9/10", style=shape.labelup, location=location.belowbar, color=color.new(color.green, 0), size=size.normal, text="🟢9/10 شراء")
+bullEng = prices[-1] > prices[-2]
 
-plotshape(earlySellCond, title="تنبيه مبكر بيع 6/10", style=shape.triangledown, location=location.abovebar, color=color.new(color.orange, 0), size=size.small, text="⚠️6/10 بيع")
-plotshape(confirmedSellCond, title="بيع مؤكد 9/10", style=shape.labeldown, location=location.abovebar, color=color.new(color.red, 0), size=size.normal, text="🔴9/10 بيع")
+earlyBuy = er > 0.28 and er < 0.45 and of_ma > 55 and agree >= 2
+confirmedBuy = er >= 0.40 and of_ma > 50 and agree >= 3 and bullEng
 
-plot(er, "ER", color=color.yellow)
-hline(0.28, "تنبيه", color=color.new(color.yellow, 50))
-hline(0.35, "يشخبط", color=color.new(color.red, 50))
-hline(0.45, "ترند", color=color.new(color.green, 50))
+if earlyBuy and not confirmedBuy:
+    print(f"⚠️ V70.9 تنبيه مبكر شراء 6/10 ER:{er:.2f} OF:{of_ma:.0f}% السعر:{prices[-1]}")
 
-// === تنبيهات ===
-alertcondition(earlyBuyCond, title="تنبيه مبكر شراء", message="⚠️ V70.9 تنبيه مبكر شراء 6/10 ER:{{plot(\"ER\")}} السعر {{close}} جهز حالك")
-alertcondition(confirmedBuyCond, title="شراء مؤكد", message="🟢 V70.9 شراء 9/10 ER:{{plot(\"ER\")}} دخول {{close}} SL {{close}}-12 TP {{close}}+12/+24")
-alertcondition(earlySellCond, title="تنبيه مبكر بيع", message="⚠️ V70.9 تنبيه مبكر بيع 6/10")
-alertcondition(confirmedSellCond, title="بيع مؤكد", message="🔴 V70.9 بيع 9/10 دخول {{close}}")
+if confirmedBuy:
+    if h2 < 20:
+        print(f"🟢 V70.9 شراء 9/10 توافق {agree}/4 ER:{er:.2f} دخول {prices[-1]} SL {prices[-1]-12} TP {prices[-1]+12}/{prices[-1]+24}")
+    else:
+        print(f"⛔ طلع كتير {h2:.1f}$ لا تلحق القمة")
+
+# مشان Render ما يطفي
+from flask import Flask
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return f"V70.9 شغال ER:{er:.2f} السعر:{prices[-1]}"
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
