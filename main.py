@@ -235,12 +235,12 @@ def cycle(d1, today=None):
         days = (today - d1.index[sl].date()).days
         hit = [x for x in FIB + GANN if abs(days - x) <= 1]
         low_hit = bool(hit)
-        lines.append(f"آخر قاع قبل {days} يوم" + (f" ⚡ دورة {hit[0]}" if hit else ""))
+        lines.append(f"آخر قاع قبل {days} يوم" + (f" 🔁 دورة {hit[0]}" if hit else ""))
     if sh is not None:
         days = (today - d1.index[sh].date()).days
         hit = [x for x in FIB + GANN if abs(days - x) <= 1]
         high_hit = bool(hit)
-        lines.append(f"آخر قمة قبل {days} يوم" + (f" ⚡ دورة {hit[0]}" if hit else ""))
+        lines.append(f"آخر قمة قبل {days} يوم" + (f" 🔁 دورة {hit[0]}" if hit else ""))
     if lines:
         res["txt"] = "⏳ الدورات: " + " | ".join(lines)
     if low_hit and not high_hit:
@@ -780,7 +780,7 @@ def fmt(r, header="تحليل الذهب", full=False):
     m = r["mom"]
     L = [f"🚨 {header} 🚨", f"💰 السعر: {r['price']:.2f}",
          f"D1: {nm(r['t_d1'])} | H4: {nm(r['t_h4'])}",
-         f"⚡ 15د: {m['15']:+.1f}$ | 1س: {m['1h']:+.1f}$ | 2س: {m['2h']:+.1f}$"]
+         f"📈 15د: {m['15']:+.1f}$ | 1س: {m['1h']:+.1f}$ | 2س: {m['2h']:+.1f}$"]
     if r["dir"] is None:
         L.append("⚪ لا توصية: لا اتجاه مشترك واضح")
     else:
