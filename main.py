@@ -38,6 +38,7 @@ used = {"sym": None}
 offset = {"auto": 0.0, "manual": 0.0}
 daily = {"d": None, "n": 0}
 ai_state = {"dir": None, "t": 0, "rejected": False}
+ai_err = {"msg": ""}
 bt = {"running": False}
 
 
@@ -476,13 +477,15 @@ def call_claude(prompt, max_tokens=700, search=True):
             if resp.status_code == 200:
                 return "".join(b.get("text", "") for b in resp.json().get("content", [])
                                if b.get("type") == "text").strip()
-            print(f"[ai] {resp.status_code} {resp.text[:200]}", flush=True)
+            ai_err["msg"] = f"{resp.status_code}: {resp.text[:250]}"
+            print(f"[ai] {ai_err['msg']}", flush=True)
             if "tools" in body:
                 body.pop("tools")      # أعد المحاولة بدون بحث الويب
                 continue
             return None
         except Exception as e:
-            print(f"[ai] error: {e}", flush=True)
+            ai_err["msg"] = f"{type(e).__name__}: {str(e)[:200]}"
+            print(f"[ai] error: {ai_err['msg']}", flush=True)
             return None
     return None
 
@@ -524,7 +527,7 @@ def ai_commentary(r):
               "\n\nابحث عن أخبار الذهب والأحداث الاقتصادية المهمة اليوم، ثم اكتب قراءة سوق مختصرة بالعربية "
               "(حتى 10 أسطر): الصورة العامة، ما الذي يجب انتظاره، مستويات الشراء/البيع المهمة، وأهم المخاطر. "
               "لا تضمن أرباحاً.")
-    return call_claude(prompt, 800) or "تعذر الاتصال بالذكاء الاصطناعي (تأكد من ANTHROPIC_API_KEY)."
+    return call_claude(prompt, 800) or f"تعذر الاتصال بالذكاء الاصطناعي.\nالسبب: {ai_err['msg'] or 'غير معروف'}"
 
 
 # ---------------- اختبار تاريخي ----------------
