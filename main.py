@@ -555,6 +555,66 @@ def run_optimize(cid, days):
         bt["running"] = False
 
 
+def run_validate(cid):
+    """اختبار نظيف: قواعد ثابتة مسبقاً على السنة السابقة (لم تُستخدم بأي اختيار)"""
+    try:
+        reply(cid, "⏳ بدأ التحقق على السنة السابقة (فترة جديدة تماماً). ممكن ياخد 15-30 دقيقة، لا تعيد الأمر.")
+        raw = get_raw("1h", "730d")
+        idx = raw.index.tz_convert("UTC") if raw.index.tz is not None else raw.index.tz_localize("UTC")
+        n = len(raw)
+        end = n - int(365 * 23)
+        start = max(300, n - int(715 * 23))
+        if end - start < 1000:
+            reply(cid, "البيانات المتاحة لا تكفي لفترة سابقة.")
+            return
+        cands = []
+        for i in range(start, end, 2):
+            if not (SESSION[0] <= idx[i].hour < SESSION[1]):
+                continue
+            try:
+                w = raw.iloc[max(0, i - 1500):i + 1].copy()
+                o = float(w["Open"].iloc[-1])
+                for k in ("Open", "High", "Low", "Close"):
+                    w.iloc[-1, w.columns.get_loc(k)] = o
+                h4 = w.resample("4h").agg(OHLC).dropna()
+                d1 = w.resample("1D").agg(OHLC).dropna()
+                if len(d1) < 60 or len(h4) < 60:
+                    continue
+                r = evaluate(d1, w, h4, None, o, idx[i].hour, today=idx[i].date())
+                if not r["dir"]:
+                    continue
+                cands.append({"i": i, "d": r["dir"], "score": r["score"], "f": r["flags"],
+                              "miss": bool(r["missing"]),
+                              "R": simulate(raw, i, r["dir"], r["entry"], r["sl"], r["tp1"], r["tp"])})
+            except Exception:
+                pass
+        days = (end - start) / 23
+        wk = max(days / 7, 1)
+        rules = [
+            ("كل الإشارات (اتجاه H4 فقط)", lambda c: True),
+            ("الاستراتيجية الحالية (سكور≥70 + شروط)", lambda c: c["score"] >= 70 and not c["miss"]),
+            ("قاعدة جديدة: D1 يوافق + ابتلاع H1/H4", lambda c: c["f"]["D1 يوافق"] and c["f"]["ابتلاع H1/H4"]),
+            ("ابتلاع H1/H4 فقط", lambda c: c["f"]["ابتلاع H1/H4"]),
+            ("D1 يوافق فقط", lambda c: c["f"]["D1 يوافق"]),
+        ]
+        L = [f"✅ تحقق على فترة جديدة ({days:.0f} يوم، {len(cands)} إشارة)", ""]
+        for name, fn in rules:
+            R = take(cands, fn)
+            L.append(name)
+            if R:
+                st = stats(R)
+                L.append(f"   {line(R)} | هبوط {st['dd']:.1f}R | ~{len(R) / wk:.1f} صفقة/أسبوع")
+            else:
+                L.append("   لا صفقات")
+        L += ["", "إذا القاعدة الجديدة موجبة وPF فوق 1.3 هنا كمان (فترة ما استخدمناها بأي اختيار)، فاحتمال الأفضلية حقيقي أكثر.",
+              "إذا ضاعت، فالسابقة كانت صدفة ولا نعتمد عليها."]
+        reply(cid, "\n".join(L))
+    except Exception as e:
+        reply(cid, f"❌ فشل: {e}")
+    finally:
+        bt["running"] = False
+
+
 # ---------------- الذكاء الاصطناعي (Claude) ----------------
 def call_claude(prompt, max_tokens=700, search=True):
     if not ANTHROPIC_KEY:
@@ -866,6 +926,12 @@ def commands():
                     else:
                         reply(cid, "🧠 جاري التفكير والبحث بالأخبار...")
                         reply(cid, ai_commentary(analyze()))
+                elif text.startswith("/validate"):
+                    if bt["running"]:
+                        reply(cid, "اختبار شغال حالياً، انتظر النتيجة.")
+                    else:
+                        bt["running"] = True
+                        threading.Thread(target=run_validate, args=(cid,), daemon=True).start()
                 elif text.startswith("/optimize"):
                     if bt["running"]:
                         reply(cid, "اختبار شغال حالياً، انتظر النتيجة.")
