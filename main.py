@@ -466,27 +466,34 @@ def call_claude(prompt, max_tokens=700, search=True):
         return None
     hdr = {"x-api-key": ANTHROPIC_KEY, "anthropic-version": "2023-06-01",
            "content-type": "application/json"}
-    body = {"model": AI_MODEL, "max_tokens": max_tokens,
-            "messages": [{"role": "user", "content": prompt}]}
-    if search:
-        body["tools"] = [{"type": "web_search_20250305", "name": "web_search", "max_uses": 2}]
-    for _ in range(2):
+    use_search = search
+    for attempt in range(3):
+        body = {"model": AI_MODEL, "max_tokens": max_tokens + (1500 if use_search else 0),
+                "messages": [{"role": "user", "content": prompt}]}
+        if use_search:
+            body["tools"] = [{"type": "web_search_20250305", "name": "web_search", "max_uses": 2}]
         try:
             resp = requests.post("https://api.anthropic.com/v1/messages",
-                                 headers=hdr, json=body, timeout=90)
-            if resp.status_code == 200:
-                return "".join(b.get("text", "") for b in resp.json().get("content", [])
-                               if b.get("type") == "text").strip()
-            ai_err["msg"] = f"{resp.status_code}: {resp.text[:250]}"
-            print(f"[ai] {ai_err['msg']}", flush=True)
-            if "tools" in body:
-                body.pop("tools")      # أعد المحاولة بدون بحث الويب
-                continue
-            return None
+                                 headers=hdr, json=body, timeout=120)
         except Exception as e:
             ai_err["msg"] = f"{type(e).__name__}: {str(e)[:200]}"
             print(f"[ai] error: {ai_err['msg']}", flush=True)
             return None
+        if resp.status_code != 200:
+            ai_err["msg"] = f"{resp.status_code}: {resp.text[:250]}"
+            print(f"[ai] {ai_err['msg']}", flush=True)
+            if use_search:
+                use_search = False          # أعد المحاولة بدون بحث الويب
+                continue
+            return None
+        j = resp.json()
+        txt = "".join(b.get("text", "") for b in j.get("content", [])
+                      if b.get("type") == "text").strip()
+        if txt:
+            return txt
+        ai_err["msg"] = f"رد فارغ (stop_reason={j.get('stop_reason')})"
+        print(f"[ai] {ai_err['msg']}", flush=True)
+        use_search = False                  # جرب بدون بحث
     return None
 
 
