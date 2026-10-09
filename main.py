@@ -1,53 +1,48 @@
-// © V70.9 - تنبيه بدري + دخول مؤكد
 // @version=5
 indicator("GOLD V70.9 Early+Confirmed", overlay=true)
 
-// === حساب ER ===
-erLength = 14
-change = math.abs(close - close[erLength])
-volatility = math.sum(math.abs(close - close[1]), erLength)
-ER = volatility > 0 ? change / volatility : 0
+// === ER ===
+len = 14
+chg = math.abs(close - close[len])
+vol = math.sum(math.abs(ta.change(close)), len)
+er = vol > 0? chg / vol : 0
 
-// === OF محاكاة (دلتا الشموع) ===
-OF = (close - open) / (high - low + 0.001) * 100
-OF_MA = ta.sma(OF, 10)
+// === OF مبسط ===
+of_raw = (close - open) / (high - low + 0.0001) * 100
+of_ma = ta.sma(of_raw, 10)
 
-// === توافق الفريمات ===
-m15 = request.security(syminfo.tickerid, "15", close - close[3])
-h1  = request.security(syminfo.tickerid, "60", close - close[5])
-h2  = request.security(syminfo.tickerid, "120", close - close[5])
-agreeBuy = (m15>0?1:0) + (h1>0?1:0) + (h2>0?1:0)
+// === توافق - بدون security معقد ===
+m15_diff = close - close[3]
+h1_diff = close - close[12]
+h2_diff = close - close[24]
+agreeBuy = (m15_diff > 0? 1 : 0) + (h1_diff > 0? 1 : 0) + (h2_diff > 0? 1 : 0)
+agreeSell = (m15_diff < 0? 1 : 0) + (h1_diff < 0? 1 : 0) + (h2_diff < 0? 1 : 0)
 
 // === ابتلاع ===
-bullEng = close > open and close > high[1] and open < close[1]
-bearEng = close < open and close < low[1] and open > close[1]
+bullEng = close > open and close[1] < open[1] and close > open[1] and open < close[1]
+bearEng = close < open and close[1] > open[1] and close < open[1] and open > close[1]
 
-// === V70.9 منطق جديد ===
-earlyBuy = ER > 0.28 and ER < 0.45 and OF_MA > 55 and agreeBuy >= 2 and ta.rising(ER, 3)
-confirmedBuy = ER >= 0.40 and OF_MA > 50 and agreeBuy >= 3 and bullEng
+// === شروط V70.9 ===
+earlyBuyCond = er > 0.28 and er < 0.45 and of_ma > 55 and agreeBuy >= 2 and er > er[1]
+confirmedBuyCond = er >= 0.40 and of_ma > 50 and agreeBuy >= 3 and bullEng and h2_diff < 20
 
-earlySell = ER > 0.28 and ER < 0.45 and OF_MA < -55 and agreeBuy <= 1 and ta.rising(ER, 3)
-confirmedSell = ER >= 0.40 and OF_MA < -50 and agreeBuy <= 1 and bearEng
+earlySellCond = er > 0.28 and er < 0.45 and of_ma < -55 and agreeSell >= 2 and er > er[1]
+confirmedSellCond = er >= 0.40 and of_ma < -50 and agreeSell >= 3 and bearEng and h2_diff > -20
 
-// === تنبيه بدري - ما بيدخل، بس بينبهك ===
-if earlyBuy and not confirmedBuy
-    alert("⚠️ V70.9 تنبيه مبكر شراء 6/10 ER:"+str.tostring(ER, "#.##")+" OF:"+str.tostring(OF_MA, "#")+"% السعر قرب يطلع - جهز حالك", alert.freq_once_per_bar)
+// === رسم ===
+plotshape(earlyBuyCond, title="تنبيه مبكر شراء 6/10", style=shape.triangleup, location=location.belowbar, color=color.new(color.yellow, 0), size=size.small, text="⚠️6/10 شراء")
+plotshape(confirmedBuyCond, title="شراء مؤكد 9/10", style=shape.labelup, location=location.belowbar, color=color.new(color.green, 0), size=size.normal, text="🟢9/10 شراء")
 
-if earlySell and not confirmedSell
-    alert("⚠️ V70.9 تنبيه مبكر بيع 6/10 ER:"+str.tostring(ER, "#.##")+" OF:"+str.tostring(OF_MA, "#")+"%", alert.freq_once_per_bar)
+plotshape(earlySellCond, title="تنبيه مبكر بيع 6/10", style=shape.triangledown, location=location.abovebar, color=color.new(color.orange, 0), size=size.small, text="⚠️6/10 بيع")
+plotshape(confirmedSellCond, title="بيع مؤكد 9/10", style=shape.labeldown, location=location.abovebar, color=color.new(color.red, 0), size=size.normal, text="🔴9/10 بيع")
 
-// === دخول مؤكد ===
-if confirmedBuy
-    // فلتر القمة - اذا طلع اكتر من 18$ بساعتين لا تدخل بالقمة استنى تصحيح
-    if h2 < 20
-        alert("🟢 V70.9 شراء 9/10 توافق "+str.tostring(agreeBuy)+"/4 ER:"+str.tostring(ER, "#.##")+" 15د "+str.tostring(m15, "#.#")+"$ 1س "+str.tostring(h1, "#.#")+"$ 2س "+str.tostring(h2, "#.#")+"$ ابتلاع شرائي OF "+str.tostring(OF_MA, "#")+"% دخول "+str.tostring(close)+" SL "+str.tostring(close-12)+" TP "+str.tostring(close+12)+"/"+str.tostring(close+24), alert.freq_once_per_bar)
-    else
-        alert("⛔ V70.9 طلع كتير "+str.tostring(h2, "#")+"$ - لا تلحق القمة استنى تصحيح", alert.freq_once_per_bar)
+plot(er, "ER", color=color.yellow)
+hline(0.28, "تنبيه", color=color.new(color.yellow, 50))
+hline(0.35, "يشخبط", color=color.new(color.red, 50))
+hline(0.45, "ترند", color=color.new(color.green, 50))
 
-if confirmedSell
-    if h2 > -20
-        alert("🔴 V70.9 بيع 9/10 توافق "+str.tostring(agreeBuy)+"/4 ER:"+str.tostring(ER, "#.##")+" دخول "+str.tostring(close), alert.freq_once_per_bar)
-
-plot(ER, "ER", color=color.yellow)
-hline(0.35, "يشخبط", color=color.red)
-hline(0.45, "ترند", color=color.green)
+// === تنبيهات ===
+alertcondition(earlyBuyCond, title="تنبيه مبكر شراء", message="⚠️ V70.9 تنبيه مبكر شراء 6/10 ER:{{plot(\"ER\")}} السعر {{close}} جهز حالك")
+alertcondition(confirmedBuyCond, title="شراء مؤكد", message="🟢 V70.9 شراء 9/10 ER:{{plot(\"ER\")}} دخول {{close}} SL {{close}}-12 TP {{close}}+12/+24")
+alertcondition(earlySellCond, title="تنبيه مبكر بيع", message="⚠️ V70.9 تنبيه مبكر بيع 6/10")
+alertcondition(confirmedSellCond, title="بيع مؤكد", message="🔴 V70.9 بيع 9/10 دخول {{close}}")
