@@ -4,8 +4,17 @@ import pandas as pd
 import yfinance as yf
 from flask import Flask
 
-TOKEN = os.getenv("TELEGRAM_TOKEN")
-CHAT = os.getenv("CHAT_ID")
+def env(*names):
+    for n in names:
+        v = os.getenv(n)
+        if v:
+            return v.strip().strip('"').strip("'")
+    return None
+
+
+TOKEN = env("TELEGRAM_TOKEN", "BOT_TOKEN", "TOKEN", "TELEGRAM_BOT_TOKEN", "API_TOKEN")
+CHAT = env("CHAT_ID", "TELEGRAM_CHAT_ID", "CHAT", "USER_ID")
+print(f"[startup] token set: {bool(TOKEN)} | chat id set: {bool(CHAT)}", flush=True)
 SYMBOL = "GC=F"                          # عقود الذهب (قريب من السبوت)
 MIN_SCORE = int(os.getenv("MIN_SCORE", "70"))
 COOLDOWN = 3 * 3600                      # لا تكرر نفس الاتجاه قبل 3 ساعات
@@ -114,6 +123,7 @@ def loop():
                     last.update(dir=sig["dir"], t=time.time())
         except Exception as e:
             status["msg"] = f"error: {e}"
+            print(f"[loop] error: {e}", flush=True)
         time.sleep(CHECK_EVERY)
 
 
@@ -135,11 +145,14 @@ def reply(chat_id, text):
 
 def commands():
     if not TOKEN:
+        print("[commands] NO TOKEN FOUND - add TELEGRAM_TOKEN in Render Environment", flush=True)
         return
     try:
+        me = requests.get(f"https://api.telegram.org/bot{TOKEN}/getMe", timeout=15).json()
+        print(f"[commands] getMe: {me.get('ok')} {me.get('description', '')}", flush=True)
         requests.get(f"https://api.telegram.org/bot{TOKEN}/deleteWebhook", timeout=15)
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[commands] startup error: {e}", flush=True)
     offset = 0
     while True:
         try:
@@ -152,6 +165,7 @@ def commands():
                 cid = msg.get("chat", {}).get("id")
                 if not cid:
                     continue
+                print(f"[commands] got: {text}", flush=True)
                 if text.startswith("/tawsiya"):
                     reply(cid, "⏳ جاري التحليل...")
                     sig, info = analyze()
@@ -167,6 +181,7 @@ def commands():
                     reply(cid, "أهلاً! أرسل /tawsiya للحصول على تحليل الذهب الآن.")
         except Exception as e:
             status["msg"] = f"cmd error: {e}"
+            print(f"[commands] error: {e}", flush=True)
             time.sleep(5)
 
 
