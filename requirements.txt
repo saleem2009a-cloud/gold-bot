@@ -1,7 +1,5 @@
-pyTelegramBotAPI==4.14.0
-yfinance==0.2.38
-matplotlib==3.8.4
-flask==3.0.3
-pytz
+flask
+gunicorn
 requests
-numpy
+pandas
+yfinance
