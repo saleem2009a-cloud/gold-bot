@@ -1,182 +1,135 @@
-import os, requests, time, numpy as np
-from datetime import datetime
-TOKEN = "".join(os.getenv("BOT_TOKEN","").split())
-print("V70.9 EARLY + V70.8 ORIGINAL", flush=True)
-import telebot
+import os, time, threading
+import requests
+import pandas as pd
+import yfinance as yf
 from flask import Flask
-import threading
-app = Flask(__name__)
-bot = telebot.TeleBot(TOKEN)
-AUTO_CHATS=set(); LAST_ALERT={}; LAST_SIDE={"side":"انتظار","time":0,"price":0}
 
-def get_price():
-    try: return float(requests.get("https://api.gold-api.com/price/XAU",timeout=5).json()['price'])
-    except: return 4126.8
-
-def get_data_full():
-    try:
-        url="https://query1.finance.yahoo.com/v8/finance/chart/GC=F?range=2d&interval=5m"
-        r=requests.get(url,headers={"User-Agent":"Mozilla/5.0"},timeout=10).json()
-        res=r['chart']['result'][0]
-        ts=np.array(res['timestamp'])
-        q=res['indicators']['quote'][0]
-        c=np.array([x for x in q['close'] if x is not None],float)
-        o=np.array([x for x in q['open'] if x is not None],float)
-        h=np.array([x for x in q['high'] if x is not None],float)
-        l=np.array([x for x in q['low'] if x is not None],float)
-        v=np.array([x for x in q['volume'] if x is not None],float)
-        n=len(c); ts=ts[-n:]
-        return o[-100:],h[-100:],l[-100:],c[-100:],v[-100:],ts[-100:]
-    except: return None,None,None,None,None,None
-
-def get_rsi(c,p=14):
-    try:
-        d=np.diff(c); g=np.where(d>0,d,0); ls=np.where(d<0,-d,0)
-        return 100-(100/(1+np.mean(g[-p:])/(np.mean(ls[-p:]) or 0.01)))
-    except: return 50
-
-def get_structure(h,l,c):
-    try:
-        last_high=np.max(h[-20:-2]); last_low=np.min(l[-20:-2])
-        if c[-1]>last_high+1.5:
-            if c[-1]-last_high < 4: return f"كسر وهمي قمة {last_high:.1f}","لا يوجد"
-            return f"BOS صاعد كسر {last_high:.1f}","شراء"
-        if c[-1]<last_low-1.5:
-            if last_low-c[-1] < 4: return f"كسر وهمي قاع {last_low:.1f}","لا يوجد"
-            return f"BOS هابط كسر {last_low:.1f}","بيع"
-        return "لا كسر", "لا يوجد"
-    except: return "لا هيكل","لا يوجد"
-
-def detect_engulfing(o,c):
-    try:
-        o1,c1=o[-3],c[-3]; o2,c2=o[-2],c[-2]
-        b1=abs(c1-o1); b2=abs(c2-o2)
-        if b1<0.4: return "لا ابتلاع","لا يوجد"
-        if (c1>o1)and(c2<o2)and b2>b1*1.2: return "🔴 ابتلاع بيعي","بيع"
-        if (c1<o1)and(c2>o2)and b2>b1*1.2: return "🟢 ابتلاع شرائي","شراء"
-    except: pass
-    return "لا ابتلاع","لا يوجد"
-
-def detect_flow(o,h,l,c,v):
-    try:
-        bv=np.sum(v[-10:][c[-10:]>o[-10:]]); sv=np.sum(v[-10:][c[-10:]<o[-10:]])
-        tot=bv+sv or 1; delta=(bv-sv)/tot*100
-        side="انتظار"
-        if delta>=40: side="شراء"
-        elif delta<=-40: side="بيع"
-        return side,f"OF {delta:+.0f}%",delta
-    except: return "انتظار","OF خطأ",0
-
-def get_trend(c):
-    def ma(a,n): return np.mean(a[-n:])
-    last=ma(c,3); s=last-ma(c,6); m=last-ma(c,12); lo=last-ma(c,24)
-    er=abs(c[-1]-c[-20]) / (np.sum(np.abs(np.diff(c[-20:]))) or 1)
-    return s,m,lo,er,f"15د:{s:+.1f}$ 1س:{m:+.1f}$ 2س:{lo:+.1f}$ ER:{er:.2f}"
-
-def check_signal():
-    global LAST_SIDE
-    try:
-        price=get_price()
-        o,h,l,c,v,ts=get_data_full()
-        if o is None: return {"txt":f"⛔ لا بيانات {price}","can":False,"score":0,"main":"انتظار"}
-
-        struct_txt,struct_side=get_structure(h,l,c)
-        eng_txt,eng_side=detect_engulfing(o,c)
-        flow_side,flow_txt,delta=detect_flow(o,h,l,c,v)
-        short,mid,long_,er,trend_txt=get_trend(c)
-
-        votes=[];
-        if eng_side!="لا يوجد": votes.append(eng_side)
-        if short>1.2: votes.append("شراء")
-        elif short<-1.2: votes.append("بيع")
-        if flow_side!="انتظار": votes.append(flow_side)
-        if struct_side!="لا يوجد": votes.append(struct_side)
-
-        buy_v=votes.count("شراء"); sell_v=votes.count("بيع")
-        if buy_v>sell_v: main="شراء"
-        elif sell_v>buy_v: main="بيع"
-        else: main="انتظار"
-
-        # ===== V70.9 الجديد: تنبيه مبكر 6/10 =====
-        # هاد بيجي قبل اشارة 9/10 بـ 15-20$ - ما بيلغي القديم
-        is_rising_trend = c[-1] > c[-2] > c[-3] if len(c)>=3 else False
-        is_falling_trend = c[-1] < c[-2] < c[-3] if len(c)>=3 else False
-
-        # تنبيه مبكر شراء
-        if 0.28 <= er < 0.45 and main=="شراء" and buy_v>=1 and flow_side=="شراء" and short>0 and is_rising_trend:
-            txt=f"⚠️ V70.9 تنبيه مبكر شراء 6/10 توافق {buy_v}/4\n{trend_txt}\n{struct_txt}\n{eng_txt}\n{flow_txt}\n💰 {price:.1f}\n⏰ السعر عم يجهز يطلع - جهز حالك"
-            return {"txt":txt,"can":True,"score":6,"main":"شراء","early":True}
-
-        # تنبيه مبكر بيع
-        if 0.28 <= er < 0.45 and main=="بيع" and sell_v>=1 and flow_side=="بيع" and short<0 and is_falling_trend:
-            txt=f"⚠️ V70.9 تنبيه مبكر بيع 6/10 توافق {sell_v}/4\n{trend_txt}\n{struct_txt}\n{eng_txt}\n{flow_txt}\n💰 {price:.1f}\n⏰ السعر عم يجهز ينزل"
-            return {"txt":txt,"can":True,"score":6,"main":"بيع","early":True}
-
-        # ===== استراتيجيتك القديمة V70.8 الأصلية من هون وانت نازل - ما لمستها =====
-        if er < 0.35:
-            return {"txt":f"⛔ V70.8 يشخبط ER {er:.2f} لا تدخل\n{trend_txt}\n{flow_txt}\n💰 {price:.1f}","can":False,"score":2,"main":"انتظار"}
-        if "وهمي" in struct_txt:
-            return {"txt":f"⏳ V70.8 كسر وهمي - استنى\n{struct_txt}\n{trend_txt}\n💰 {price:.1f}","can":False,"score":3,"main":"انتظار"}
-        if eng_side=="لا يوجد" and "BOS" not in struct_txt:
-            return {"txt":f"⛔ V70.8 ما في تأكيد\n{trend_txt}\n{eng_txt} | {flow_txt} | {struct_txt}\n💰 {price:.1f}","can":False,"score":3,"main":"انتظار"}
-        if main=="بيع" and (mid>0 or long_>-2):
-            return {"txt":f"⛔ V70.8 الفريمات عكس لا تبيع\n1س {mid:+.1f}$ 2س {long_:+.1f}$\n{trend_txt}\n💰 {price:.1f}","can":False,"score":3,"main":"انتظار"}
-        if main=="شراء" and (mid<0 or long_<2):
-            return {"txt":f"⛔ V70.8 الفريمات عكس لا تشتري\n1س {mid:+.1f}$ 2س {long_:+.1f}$\n{trend_txt}\n💰 {price:.1f}","can":False,"score":3,"main":"انتظار"}
-        if max(buy_v,sell_v)<2:
-            return {"txt":f"⛔ V70.8 توافق ضعيف {max(buy_v,sell_v)}/4\n{trend_txt}\n{eng_txt}\n💰 {price:.1f}","can":False,"score":3,"main":"انتظار"}
-
-        score=7
-        if eng_side!="لا يوجد": score+=1
-        if abs(delta)>50: score+=1
-        if er>0.5: score+=1
-        if score>10: score=10
-
-        now=time.time()
-        if LAST_SIDE["side"]!=main and LAST_SIDE["side"]!="انتظار" and (now-LAST_SIDE["time"])<900 and abs(price-LAST_SIDE["price"])<8:
-            return {"txt":f"⛔ مانع تقلب 15د\n💰 {price:.1f}","can":False,"score":3,"main":"انتظار"}
-        if main!="انتظار": LAST_SIDE={"side":main,"time":now,"price":price}
-
-        if main=="بيع":
-            txt=f"🔴 V70.8 {main} {score}/10 توافق {sell_v}/4\n{trend_txt}\n{struct_txt}\n{eng_txt}\n{flow_txt}\n🎯 {price:.1f} 🛑 {price+12:.1f} ✅ {price-12:.1f}/{price-24:.1f}\n💰 {price:.1f}"
-        else:
-            txt=f"🟢 V70.8 {main} {score}/10 توافق {buy_v}/4\n{trend_txt}\n{struct_txt}\n{eng_txt}\n{flow_txt}\n🎯 {price:.1f} 🛑 {price-12:.1f} ✅ {price+12:.1f}/{price+24:.1f}\n💰 {price:.1f}"
-        return {"txt":txt,"can":True,"score":score,"main":main,"early":False}
-    except Exception as e:
-        return {"txt":f"⛔ خطأ {e}","can":False,"score":0,"main":"انتظار"}
-
-@bot.message_handler(commands=['start','tawsiya'])
-def tawsiya(m):
-    bot.send_message(m.chat.id, check_signal()["txt"])
-@bot.message_handler(commands=['auto_on'])
-def auto_on(m):
-    AUTO_CHATS.add(m.chat.id); bot.send_message(m.chat.id,"✅ V70.9 شغال - مبكر 6/10 + مؤكد 9/10")
-@bot.message_handler(commands=['auto_off'])
-def auto_off(m):
-    AUTO_CHATS.discard(m.chat.id); bot.send_message(m.chat.id,"⛔ وقف")
-
-def watcher():
-    while True:
-        time.sleep(180)
-        if not AUTO_CHATS: continue
-        d=check_signal()
-        # يبعت بس المؤكد 8/10 وما فوق، المبكر 6/10 بس ب /tawsiya
-        if not d["can"] or d["score"]<8: continue
-        if d.get("early"): continue
-        now=time.time()
-        for cid in list(AUTO_CHATS):
-            if now-LAST_ALERT.get(cid,0)<1200: continue
-            try: bot.send_message(cid,f"🚨 V70.8 🚨\n{d['txt']}"); LAST_ALERT[cid]=now
-            except: pass
+TOKEN = os.getenv("TELEGRAM_TOKEN")
+CHAT = os.getenv("CHAT_ID")
+SYMBOL = "GC=F"                          # عقود الذهب (قريب من السبوت)
+MIN_SCORE = int(os.getenv("MIN_SCORE", "70"))
+COOLDOWN = 3 * 3600                      # لا تكرر نفس الاتجاه قبل 3 ساعات
+CHECK_EVERY = 300                        # فحص كل 5 دقائق
 
 app = Flask(__name__)
-@app.route('/')
-def home(): return "V70.9 OK - early+confirmed"
-def run_bot():
+last = {"dir": None, "t": 0}
+status = {"msg": "starting"}
+
+
+def ema(s, n):
+    return s.ewm(span=n, adjust=False).mean()
+
+
+def rsi(s, n=14):
+    d = s.diff()
+    up = d.clip(lower=0).ewm(alpha=1 / n, adjust=False).mean()
+    dn = (-d.clip(upper=0)).ewm(alpha=1 / n, adjust=False).mean()
+    return 100 - 100 / (1 + up / dn)
+
+
+def atr(df, n=14):
+    pc = df["Close"].shift()
+    tr = pd.concat([df["High"] - df["Low"],
+                    (df["High"] - pc).abs(),
+                    (df["Low"] - pc).abs()], axis=1).max(axis=1)
+    return tr.ewm(alpha=1 / n, adjust=False).mean()
+
+
+def get(interval, period):
+    df = yf.download(SYMBOL, interval=interval, period=period,
+                     progress=False, auto_adjust=True)
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+    return df.dropna()
+
+
+def trend(df):
+    c = df["Close"]
+    e50, e200 = ema(c, 50).iloc[-2], ema(c, 200).iloc[-2]
+    p = c.iloc[-2]
+    if p > e50 > e200:
+        return 1
+    if p < e50 < e200:
+        return -1
+    return 0
+
+
+def analyze():
+    d1 = get("1d", "2y")
+    h1 = get("1h", "60d")
+    h4 = h1.resample("4h").agg({"Open": "first", "High": "max", "Low": "min",
+                                "Close": "last"}).dropna()
+    m15 = get("15m", "5d")
+
+    t_d1, t_h4 = trend(d1), trend(h4)
+    if t_h4 == 0 or t_d1 == -t_h4:
+        return None, "لا اتجاه واضح أو تعارض بين D1 وH4"
+    d = t_h4
+    score = 30                                  # اتجاه H4
+    score += 20 if t_d1 == d else 0             # توافق D1
+
+    c = h1["Close"]
+    e21, e50 = ema(c, 21), ema(c, 50)
+    a = atr(h1).iloc[-2]
+    price = c.iloc[-1]
+    r = rsi(c)
+    if (e21.iloc[-2] > e50.iloc[-2]) == (d == 1):
+        score += 15                             # ترتيب المتوسطات على H1
+    if abs(price - e21.iloc[-2]) <= a:          # تصحيح قريب (ليس مطاردة)
+        score += 20
+    elif abs(price - e21.iloc[-2]) > 2 * a:
+        score -= 15                             # السعر ممتد، خطر مطاردة
+    if d == 1 and 40 <= r.iloc[-2] <= 62 and r.iloc[-2] > r.iloc[-3]:
+        score += 10
+    if d == -1 and 38 <= r.iloc[-2] <= 60 and r.iloc[-2] < r.iloc[-3]:
+        score += 10
+    m = m15["Close"]
+    if (m.iloc[-2] > ema(m, 21).iloc[-2]) == (d == 1):
+        score += 5                              # تأكيد M15
+
+    sl_dist, tp_dist = 1.5 * a, 3.0 * a
+    entry = float(price)
+    sl = entry - d * sl_dist
+    tp = entry + d * tp_dist
+    return {"dir": d, "score": score, "entry": entry, "sl": sl, "tp": tp,
+            "rr": tp_dist / sl_dist}, f"score={score}"
+
+
+def send(text):
+    if not TOKEN or not CHAT:
+        print(text)
+        return
+    requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage",
+                  data={"chat_id": CHAT, "text": text}, timeout=15)
+
+
+def loop():
     while True:
-        try: bot.infinity_polling(timeout=60,long_polling_timeout=60)
-        except: time.sleep(5)
-threading.Thread(target=run_bot,daemon=True).start()
-threading.Thread(target=watcher,daemon=True).start()
-if __name__=="__main__":
-    app.run(host="0.0.0.0",port=int(os.environ.get("PORT",10000)))
+        try:
+            sig, info = analyze()
+            status["msg"] = info
+            if sig and sig["score"] >= MIN_SCORE:
+                if sig["dir"] != last["dir"] or time.time() - last["t"] > COOLDOWN:
+                    side = "شراء 🟢" if sig["dir"] == 1 else "بيع 🔴"
+                    send(f"🥇 توصية ذهب: {side}\n"
+                         f"الدخول: {sig['entry']:.2f}\n"
+                         f"وقف الخسارة: {sig['sl']:.2f}\n"
+                         f"الهدف: {sig['tp']:.2f}\n"
+                         f"نسبة ربح/خسارة: {sig['rr']:.1f}\n"
+                         f"قوة الإشارة: {sig['score']}/100\n"
+                         f"⚠️ تحليل آلي وليس توصية مالية. خاطر بأقل من 1% من الرصيد.")
+                    last.update(dir=sig["dir"], t=time.time())
+        except Exception as e:
+            status["msg"] = f"error: {e}"
+        time.sleep(CHECK_EVERY)
+
+
+@app.route("/")
+def home():
+    return f"gold-bot running | {status['msg']}"
+
+
+threading.Thread(target=loop, daemon=True).start()
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "10000")))
