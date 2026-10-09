@@ -490,7 +490,7 @@ def call_claude(prompt, max_tokens=700, search=True):
         txt = "".join(b.get("text", "") for b in j.get("content", [])
                       if b.get("type") == "text").strip()
         if txt:
-            return txt
+            return txt.replace("**", "").replace("##", "").replace("# ", "")
         ai_err["msg"] = f"رد فارغ (stop_reason={j.get('stop_reason')})"
         print(f"[ai] {ai_err['msg']}", flush=True)
         use_search = False                  # جرب بدون بحث
@@ -755,6 +755,10 @@ def commands():
                 if not cid:
                     continue
                 print(f"[commands] got: {text}", flush=True)
+                global CHAT
+                if not CHAT:
+                    CHAT = str(cid)
+                    print(f"[commands] CHAT_ID auto-set to {CHAT}", flush=True)
                 if text.startswith("/tawsiya"):
                     reply(cid, "⏳ جاري التحليل...")
                     rr = analyze()
@@ -817,6 +821,19 @@ def commands():
             time.sleep(5)
 
 
+def keepalive():
+    url = os.getenv("RENDER_EXTERNAL_URL")
+    if not url:
+        print("[keepalive] RENDER_EXTERNAL_URL not set, skipping", flush=True)
+        return
+    while True:
+        time.sleep(600)
+        try:
+            requests.get(url, timeout=20)
+        except Exception as e:
+            print(f"[keepalive] {e}", flush=True)
+
+
 @app.route("/")
 def home():
     return f"gold-bot running | {status['msg']}"
@@ -824,6 +841,7 @@ def home():
 
 threading.Thread(target=loop, daemon=True).start()
 threading.Thread(target=commands, daemon=True).start()
+threading.Thread(target=keepalive, daemon=True).start()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "10000")))
