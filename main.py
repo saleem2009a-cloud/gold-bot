@@ -40,6 +40,9 @@ daily = {"d": None, "n": 0}
 ai_state = {"dir": None, "t": 0, "rejected": False}
 ai_err = {"msg": ""}
 bt = {"running": False}
+snap = {}
+scalp = {"on": False, "sig": None, "t0": None, "t_orig": None, "be": False, "bar": None}
+SPREAD = 0.35                            # تكلفة تقريبية بالدولار لكل صفقة (للاختبار)
 
 
 # ---------------- بيانات ----------------
@@ -442,7 +445,9 @@ def evaluate(d1, h1, h4, m15, price, hour, mom=None,
           "ابتلاع H1/H4": (e4 == d or e1 == d), "Pin Bar": (p4 == d or p1 == d),
           "كسر وهمي": bool(sw), "FVG": bool(fv), "OB": bool(ob), "دورة زمنية": cyc["support"] == d}
     r.update(dir=d, score=final, notes=notes, missing=missing, met=4 - len(missing), flags=fl,
-             elite=(final >= MIN_SCORE and not missing),
+             elite=bool(fl["D1 يوافق"] and fl["ابتلاع H1/H4"]),
+             need=([] if fl["D1 يوافق"] else ["D1 لا يوافق الاتجاه"]) +
+                  ([] if fl["ابتلاع H1/H4"] else ["لا ابتلاع على H1/H4"]),
              sweep=sw, fvg=fv, ob=ob, candle=candle_txt,
              entry=price, sl=price - d * sl_dist, sl0=price - d * sl_dist,
              tp=price + d * 2 * sl_dist, tp1=price + d * sl_dist, rr=2.0)
@@ -461,6 +466,7 @@ def analyze():
     mom = {"15": price - float(mc.iloc[-2]), "1h": price - float(mc.iloc[-5]),
            "2h": price - float(mc.iloc[-9])}
     hour = datetime.now(timezone.utc).hour
+    snap["m15"], snap["h1"] = m15, h1
     return evaluate(d1, h1, h4, m15, price, hour, mom, london_orb(m15))
 
 
@@ -741,7 +747,7 @@ def run_backtest(cid, days):
                 if len(d1) < 60 or len(h4) < 60:
                     continue
                 r = evaluate(d1, w, h4, None, o, idx[i].hour, today=idx[i].date())
-                if not r["dir"] or r["missing"] or r["score"] < 60:
+                if not r["dir"] or not r["elite"]:
                     continue
                 d = r["dir"]
                 if i - last_i[d] < 6:
@@ -785,15 +791,14 @@ def fmt(r, header="تحليل الذهب", full=False):
               f" | OB: {'نعم' if r['ob'] else 'لا'} | FVG: {r['fvg'] or 'لا'}",
               f"🕯️ {r['candle']}", f"🏦 ORB لندن: {r['orb']}"]
         if r["elite"]:
-            q = "استثنائية 💎" if r["score"] >= 95 else "ممتازة ⭐"
-            L += [f"✅ توصية {q}",
+            L += ["✅ توصية: ابتلاع مع الاتجاه (D1 + H1/H4)",
                   f"🎯 الدخول: {r['entry']:.2f}", f"🛑 الوقف: {r['sl']:.2f}",
                   f"✅ الهدف 1 (انقل الوقف للتعادل): {r['tp1']:.2f}",
                   f"💰 الهدف 2: {r['tp']:.2f} (2:1)"]
         else:
-            L.append(f"⚪ لا فرصة ممتازة بعد ({side.split()[0]} محتمل)، الأفضل الانتظار")
-            if r["missing"]:
-                L.append("شروط ناقصة: " + "، ".join(r["missing"]))
+            L.append(f"⚪ لا توصية الآن ({side.split()[0]} محتمل)، الأفضل الانتظار")
+            if r.get("need"):
+                L.append("شروط ناقصة: " + "، ".join(r["need"]))
         if r.get("ai"):
             ai = r["ai"]
             L.append(f"🧠 مراجعة ذكية: {'موافقة ✅' if ai['verdict'] == 'approve' else 'رفض ❌'}"
@@ -854,11 +859,119 @@ def reply(chat_id, text):
                   data={"chat_id": chat_id, "text": text}, timeout=15)
 
 
+# ---------------- وضع الصفقات السريعة (سكالب) ----------------
+def scalp_eval(m15, h1, price):
+    """ابتلاع M15 مع اتجاه H1 وعند منطقة تصحيح قرب EMA21. وقف 1.2×ATR، هدف 1R ثم 2R."""
+    if len(m15) < 80 or len(h1) < 60:
+        return None
+    t, e = trend(h1), engulf(m15)
+    if t == 0 or e != t:
+        return None
+    c = m15["Close"]
+    a = float(atr(m15).iloc[-2])
+    if not a > 0:
+        return None
+    if abs(float(c.iloc[-2]) - float(ema(c, 21).iloc[-2])) > 1.2 * a:
+        return None
+    sd = max(1.2 * a, 2.0)
+    return {"dir": t, "entry": price, "sl": price - t * sd, "tp1": price + t * sd,
+            "tp": price + t * 2 * sd, "risk": sd}
+
+
+def run_scalp_bt(cid):
+    try:
+        reply(cid, "⏳ اختبار السكالب على آخر ~60 يوم (M15). دقائق...")
+        raw = get_raw("15m", "60d")
+        idx = raw.index.tz_convert("UTC") if raw.index.tz is not None else raw.index.tz_localize("UTC")
+        n, res, last_i = len(raw), [], {1: -99, -1: -99}
+        for i in range(250, n - 2):
+            if not (SESSION[0] <= idx[i].hour < SESSION[1]):
+                continue
+            try:
+                w = raw.iloc[max(0, i - 1200):i + 1].copy()
+                o = float(w["Open"].iloc[-1])
+                for k in ("Open", "High", "Low", "Close"):
+                    w.iloc[-1, w.columns.get_loc(k)] = o
+                h1 = w.resample("1h").agg(OHLC).dropna()
+                s = scalp_eval(w, h1, o)
+                if not s or i - last_i[s["dir"]] < 4:
+                    continue
+                last_i[s["dir"]] = i
+                R = simulate(raw, i, s["dir"], s["entry"], s["sl"], s["tp1"], s["tp"], maxbars=16)
+                res.append((R, s["risk"]))
+            except Exception:
+                pass
+        if not res:
+            reply(cid, "لا صفقات في الفترة.")
+            return
+        gross = [r for r, _ in res]
+        net = [r - SPREAD / k for r, k in res]
+        h = len(res) // 2
+        L = ["📊 اختبار السكالب (آخر ~60 يوم، M15)",
+             f"قبل التكلفة: {line(gross)}",
+             f"بعد سبريد {SPREAD}$: {line(net)}",
+             f"النصف الأول: {line(net[:h])}",
+             f"النصف الثاني: {line(net[h:])}",
+             f"تقريباً {len(res) / 8.5:.1f} صفقة بالأسبوع",
+             "", "فقط إذا كان المتوسط بعد السبريد موجباً في النصفين، فعّله بـ /scalp_on وجرّبه ديمو."]
+        reply(cid, "\n".join(L))
+    except Exception as e:
+        reply(cid, f"❌ فشل اختبار السكالب: {e}")
+    finally:
+        bt["running"] = False
+
+
+def scalp_step():
+    m15, h1 = snap.get("m15"), snap.get("h1")
+    if not scalp["on"] or m15 is None:
+        return
+    now = pd.Timestamp.now(tz="UTC")
+    s = scalp["sig"]
+    if s:
+        if now - scalp["t_orig"] > pd.Timedelta(hours=4):
+            send("⌛ انتهت صلاحية صفقة السكالب (4 ساعات).")
+            scalp["sig"] = None
+        else:
+            bars = m15[m15.index > scalp["t0"]]
+            if not bars.empty:
+                hi, lo, d = float(bars["High"].max()), float(bars["Low"].min()), s["dir"]
+                if (lo <= s["sl"]) if d == 1 else (hi >= s["sl"]):
+                    send("⚡🛑 السكالب: ضرب الوقف." if not scalp["be"] else "⚡⚪ السكالب: خروج عند التعادل.")
+                    scalp["sig"] = None
+                elif (hi >= s["tp"]) if d == 1 else (lo <= s["tp"]):
+                    send("⚡🎯 السكالب: تحقق الهدف 2 (+2R) ✅")
+                    scalp["sig"] = None
+                elif not scalp["be"] and ((hi >= s["tp1"]) if d == 1 else (lo <= s["tp1"])):
+                    s["sl"] = s["entry"]
+                    scalp.update(be=True, t0=now)
+                    send(f"⚡🔔 السكالب: وصل الهدف 1 ({s['tp1']:.2f}). انقل الوقف إلى {s['entry']:.2f}.")
+        return
+    bar = m15.index[-2]
+    if bar == scalp["bar"]:
+        return
+    scalp["bar"] = bar
+    if now - bar > pd.Timedelta(minutes=25):
+        return
+    if not (SESSION[0] <= now.hour < SESSION[1]):
+        return
+    r = scalp_eval(m15, h1, float(m15["Close"].iloc[-1]))
+    if r:
+        side = "شراء 🟢" if r["dir"] == 1 else "بيع 🔴"
+        send(f"⚡ صفقة سريعة (سكالب) — {side}\n🎯 الدخول: {r['entry']:.2f}\n🛑 الوقف: {r['sl']:.2f}\n"
+             f"✅ الهدف 1 (انقل الوقف للتعادل): {r['tp1']:.2f}\n💰 الهدف 2: {r['tp']:.2f}\n"
+             "⚠️ صفقة قصيرة (حتى 4 ساعات)، حجم صغير.")
+        scalp.update(sig=r, t0=now, t_orig=now, be=False)
+
+
 def loop():
     while True:
         try:
             track()
             r = analyze()
+            try:
+                scalp_step()
+            except Exception as e:
+                print(f"[scalp] error: {e}", flush=True)
             status["msg"] = f"سعر {r['price']:.2f} | قوة {r['score']}"
             if (auto["on"] and r["elite"] and r["in_session"] and active["sig"] is None
                     and (r["dir"] != last["dir"] or time.time() - last["t"] > COOLDOWN)):
@@ -926,6 +1039,18 @@ def commands():
                     else:
                         reply(cid, "🧠 جاري التفكير والبحث بالأخبار...")
                         reply(cid, ai_commentary(analyze()))
+                elif text.startswith("/scalpbt"):
+                    if bt["running"]:
+                        reply(cid, "اختبار شغال حالياً، انتظر النتيجة.")
+                    else:
+                        bt["running"] = True
+                        threading.Thread(target=run_scalp_bt, args=(cid,), daemon=True).start()
+                elif text.startswith("/scalp_on"):
+                    scalp["on"] = True
+                    reply(cid, "⚡ وضع السكالب مفعّل (يتوقف عند إعادة تشغيل السيرفر).")
+                elif text.startswith("/scalp_off"):
+                    scalp["on"] = False
+                    reply(cid, "⏸️ السكالب متوقف")
                 elif text.startswith("/validate"):
                     if bt["running"]:
                         reply(cid, "اختبار شغال حالياً، انتظر النتيجة.")
