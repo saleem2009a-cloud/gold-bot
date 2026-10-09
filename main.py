@@ -20,7 +20,6 @@ print(f"[startup] token set: {bool(TOKEN)} | chat id set: {bool(CHAT)}", flush=T
 
 SYMBOLS = ["XAUUSD=X", "GC=F"]           # سبوت أولاً، والعقود احتياطي (تُصحَّح بسعر السبوت)
 MIN_SCORE = int(os.getenv("MIN_SCORE", "85"))
-MAX_PER_DAY = 2                          # حد أقصى توصيتين باليوم
 CHECK_EVERY = 120                        # فحص كل دقيقتين
 COOLDOWN = 3600
 SESSION = (7, 20)                        # ساعات لندن + نيويورك (UTC) للتوصيات التلقائية
@@ -421,7 +420,7 @@ def loop():
             today = datetime.now(timezone.utc).date()
             if daily["d"] != today:
                 daily.update(d=today, n=0)
-            if (auto["on"] and r["elite"] and r["in_session"] and daily["n"] < MAX_PER_DAY
+            if (auto["on"] and r["elite"] and r["in_session"]
                     and active["sig"] is None
                     and (r["dir"] != last["dir"] or time.time() - last["t"] > COOLDOWN)):
                 send(fmt(r, "🔔 توصية جديدة"))
