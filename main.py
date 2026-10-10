@@ -336,6 +336,43 @@ def london_orb(m15):
     return 0, f"داخل النطاق {lo:.1f}-{hi:.1f}"
 
 
+# ---------------- مستويات الشمعة اليومية (قمة / 50% / قاع امبارح) ----------------
+def daily_levels(d1):
+    """قمة وقاع ونص آخر يوم مكتمل (آخر صف هو اليوم الحالي اللي لسا ما سكّر)"""
+    if d1 is None or len(d1) < 2:
+        return None
+    p = d1.iloc[-2]
+    H, L = float(p["High"]), float(p["Low"])
+    if H - L <= 0:
+        return None
+    return {"high": H, "mid": (H + L) / 2, "low": L}
+
+
+def daily_conf(lv, d, price, a):
+    """عامل مساعد: الشراء بمنطقة الخصم (تحت 50%) والبيع بمنطقة الغلاء (فوق 50%).
+    يمنع الشراء تحت قمة امبارح مباشرة والبيع فوق قاعها مباشرة."""
+    out = {"zone": False, "near": None, "block": False}
+    if not lv:
+        return out
+    tol = 0.4 * a
+    H, M, L = lv["high"], lv["mid"], lv["low"]
+    if d == 1:
+        out["zone"] = price < M
+        if abs(price - L) <= tol:
+            out["near"] = f"قاع امبارح {L:.2f}"
+        elif abs(price - M) <= tol:
+            out["near"] = f"نص شمعة امبارح {M:.2f}"
+        out["block"] = H - tol <= price <= H + 0.1 * a
+    else:
+        out["zone"] = price > M
+        if abs(price - H) <= tol:
+            out["near"] = f"قمة امبارح {H:.2f}"
+        elif abs(price - M) <= tol:
+            out["near"] = f"نص شمعة امبارح {M:.2f}"
+        out["block"] = L - 0.1 * a <= price <= L + tol
+    return out
+
+
 # ---------------- التحليل الكامل ----------------
 def evaluate(d1, h1, h4, m15, price, hour, mom=None,
              orb=("pre", "قبل الافتتاح أو لا بيانات"), today=None):
@@ -424,6 +461,18 @@ def evaluate(d1, h1, h4, m15, price, hour, mom=None,
         score += 5
         notes.append("نافذة دورة زمنية تدعم (+5)")
 
+    lv = daily_levels(d1)
+    dc = daily_conf(lv, d, price, a)
+    if dc["zone"]:
+        score += 5
+        notes.append(f"{'منطقة خصم (تحت 50% امبارح)' if d == 1 else 'منطقة غلاء (فوق 50% امبارح)'} (+5)")
+    if dc["near"]:
+        score += 5
+        notes.append(f"قرب {dc['near']} (+5)")
+    if dc["block"]:
+        score -= 20
+        notes.append(f"{'شراء تحت قمة امبارح' if d == 1 else 'بيع فوق قاع امبارح'} مباشرة (-20)")
+
     missing = []
     if t_d1 != d:
         missing.append("D1 لا يوافق الاتجاه")
@@ -443,11 +492,15 @@ def evaluate(d1, h1, h4, m15, price, hour, mom=None,
     fl = {"D1 يوافق": t_d1 == d, "ADX>=20": ax >= 20, "فيبو 38-62": bool(in_fib),
           "قرب EMA21": dist <= a, "سعر ممتد": dist > 2 * a, "دعم/مقاومة": lvl is not None,
           "ابتلاع H1/H4": (e4 == d or e1 == d), "Pin Bar": (p4 == d or p1 == d),
-          "كسر وهمي": bool(sw), "FVG": bool(fv), "OB": bool(ob), "دورة زمنية": cyc["support"] == d}
+          "كسر وهمي": bool(sw), "FVG": bool(fv), "OB": bool(ob), "دورة زمنية": cyc["support"] == d,
+          "منطقة 50% يومي": dc["zone"], "قرب مستوى يومي": bool(dc["near"]),
+          "عكس مستوى يومي": dc["block"]}
     r.update(dir=d, score=final, notes=notes, missing=missing, met=4 - len(missing), flags=fl,
-             elite=bool(fl["D1 يوافق"] and fl["ابتلاع H1/H4"]),
+             elite=bool(fl["D1 يوافق"] and fl["ابتلاع H1/H4"] and not dc["block"]),
              need=([] if fl["D1 يوافق"] else ["D1 لا يوافق الاتجاه"]) +
-                  ([] if fl["ابتلاع H1/H4"] else ["لا ابتلاع على H1/H4"]),
+                  ([] if fl["ابتلاع H1/H4"] else ["لا ابتلاع على H1/H4"]) +
+                  (["السعر لاصق بمستوى امبارح المعاكس"] if dc["block"] else []),
+             levels=lv, dconf=dc,
              sweep=sw, fvg=fv, ob=ob, candle=candle_txt,
              entry=price, sl=price - d * sl_dist, sl0=price - d * sl_dist,
              tp=price + d * 2 * sl_dist, tp1=price + d * sl_dist, rr=2.0)
@@ -539,8 +592,9 @@ def run_optimize(cid, days):
                     dlt = sum(a) / len(a) - sum(b) / len(b)
                     row.append(f"{dlt:+.2f}")
                     ok = ok and dlt > 0
-            tag = "✅" if ok else ("⚠️" if name == "سعر ممتد" else "▫️")
-            if ok and name != "سعر ممتد":
+            neg = name in ("سعر ممتد", "عكس مستوى يومي")
+            tag = "✅" if ok else ("⚠️" if neg else "▫️")
+            if ok and not neg:
                 good.append(name)
             L.append(f"{tag} {name}: تدريب {row[0]} | اختبار {row[1]}")
         L += ["", "✅ = مفيد بالنصفين (احتمال حقيقي). ▫️ = غير ثابت (غالباً ضجيج).", ""]
@@ -790,6 +844,9 @@ def fmt(r, header="تحليل الذهب", full=False):
         L += [f"{'🟢' if r['sweep'] else '⚪'} {sw_name if r['sweep'] else 'لا كسر وهمي'}"
               f" | OB: {'نعم' if r['ob'] else 'لا'} | FVG: {r['fvg'] or 'لا'}",
               f"🕯️ {r['candle']}", f"🏦 ORB لندن: {r['orb']}"]
+        lv = r.get("levels")
+        if lv:
+            L.append(f"📊 امبارح: قمة {lv['high']:.2f} | 50% {lv['mid']:.2f} | قاع {lv['low']:.2f}")
         if r["elite"]:
             L += ["✅ توصية: ابتلاع مع الاتجاه (D1 + H1/H4)",
                   f"🎯 الدخول: {r['entry']:.2f}", f"🛑 الوقف: {r['sl']:.2f}",
@@ -1079,6 +1136,17 @@ def commands():
                         bt["running"] = True
                         threading.Thread(target=run_backtest, args=(cid, min(max(days, 30), 600)),
                                          daemon=True).start()
+                elif text.startswith("/levels"):
+                    rr = analyze()
+                    lv = daily_levels(get("1d", "2y", 3600))
+                    if not lv:
+                        reply(cid, "ما في بيانات كافية للشمعة اليومية.")
+                    else:
+                        p = rr["price"]
+                        where = "فوق 50% (منطقة غلاء ← الأفضلية للبيع)" if p > lv["mid"] else "تحت 50% (منطقة خصم ← الأفضلية للشراء)"
+                        reply(cid, f"📊 مستويات شمعة امبارح\n🔺 القمة: {lv['high']:.2f}\n"
+                                   f"⚖️ النص 50%: {lv['mid']:.2f}\n🔻 القاع: {lv['low']:.2f}\n\n"
+                                   f"💰 السعر الآن: {p:.2f}\n{where}")
                 elif text.startswith("/price"):
                     raw = get_raw("5m", "1d")
                     refresh_offset(float(raw["Close"].iloc[-1]))
@@ -1111,7 +1179,7 @@ def commands():
                          f" | SL {s['sl']:.2f} | TP {s['tp']:.2f}") if s else "\nلا صفقة نشطة"
                     reply(cid, f"التلقائي: {'شغال' if auto['on'] else 'متوقف'}\nآخر فحص: {status['msg']}{t}")
                 elif text.startswith("/start"):
-                    reply(cid, "أهلاً! الأوامر:\n/tawsiya تحليل كامل\n/price السعر\n/ai قراءة السوق بالذكاء الاصطناعي مع الأخبار\n/backtest 180 اختبار الاستراتيجية على التاريخ\n/calib 4193.5 معايرة السعر على منصتك\n/auto_on /auto_off\n/status")
+                    reply(cid, "أهلاً! الأوامر:\n/tawsiya تحليل كامل\n/price السعر\n/levels قمة ونص وقاع شمعة امبارح\n/ai قراءة السوق بالذكاء الاصطناعي مع الأخبار\n/backtest 180 اختبار الاستراتيجية على التاريخ\n/calib 4193.5 معايرة السعر على منصتك\n/auto_on /auto_off\n/status")
         except Exception as e:
             status["msg"] = f"cmd error: {e}"
             print(f"[commands] error: {e}", flush=True)
