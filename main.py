@@ -95,8 +95,8 @@ def refresh_offset(raw_last):
     new = sp - raw_last
     if offset.get("n", 0) == 0:
         offset["auto"] = new
-    elif abs(new - offset["auto"]) <= 25:          # تجاهل القفزات الشاذة
-        offset["auto"] = 0.9 * offset["auto"] + 0.1 * new
+    elif abs(new - offset["auto"]) <= 15:          # تجاهل القفزات الشاذة
+        offset["auto"] = 0.97 * offset["auto"] + 0.03 * new   # فرق العقود/السبوت بيتغير ببطء
     offset["n"] = offset.get("n", 0) + 1
 
 
