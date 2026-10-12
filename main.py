@@ -610,6 +610,16 @@ def analyze():
     h4 = h1.resample("4h").agg(OHLC).dropna()
     m15 = shift(raw15)
     price = float(m15["Close"].iloc[-1])
+    if used["sym"].startswith("XAU/USD"):
+        # بين تحديثات Twelve Data (كل ~3 دقائق) منحدّث آخر سعر من مصدر السبوت المجاني
+        sp = spot_price()
+        if sp and abs(sp - price) < 10:
+            price = sp + offset["manual"]
+            m15 = m15.copy()
+            i = m15.index[-1]
+            m15.loc[i, "Close"] = price
+            m15.loc[i, "High"] = max(float(m15.loc[i, "High"]), price)
+            m15.loc[i, "Low"] = min(float(m15.loc[i, "Low"]), price)
     mc = m15["Close"]
     mom = {"15": price - float(mc.iloc[-2]), "1h": price - float(mc.iloc[-5]),
            "2h": price - float(mc.iloc[-9])}
@@ -1239,7 +1249,9 @@ def loop():
                 scalp_step()
             except Exception as e:
                 print(f"[scalp] error: {e}", flush=True)
-            status["msg"] = f"سعر {r['price']:.2f} | قوة {r['score']}"
+            side = {1: "شراء", -1: "بيع"}.get(r["dir"], "لا اتجاه مشترك D1/H4")
+            status["msg"] = (f"سعر {r['price']:.2f} | {side} | قوة {r['score']}"
+                             f"{' ✅ قوية' if r.get('elite') else (' ⚡ سريعة' if r.get('fast') else '')}")
             status["t"] = time.time()
             if (auto["on"] and (r["elite"] or r.get("fast")) and r["in_session"] and active["sig"] is None
                     and (r["dir"] != last["dir"] or time.time() - last["t"] > COOLDOWN)):
