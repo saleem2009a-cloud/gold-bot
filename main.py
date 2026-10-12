@@ -41,7 +41,7 @@ ai_state = {"dir": None, "t": 0, "rejected": False}
 ai_err = {"msg": ""}
 bt = {"running": False}
 snap = {}
-scalp = {"on": False, "sig": None, "t0": None, "t_orig": None, "be": False, "bar": None}
+scalp = {"on": os.getenv("SCALP_ON", "1") == "1", "sig": None, "t0": None, "t_orig": None, "be": False, "bar": None}
 SPREAD = 0.35                            # تكلفة تقريبية بالدولار لكل صفقة (للاختبار)
 
 
@@ -1007,7 +1007,7 @@ def scalp_step():
     if bar == scalp["bar"]:
         return
     scalp["bar"] = bar
-    if now - bar > pd.Timedelta(minutes=25):
+    if now - bar > pd.Timedelta(minutes=45):          # بيانات ياهو متأخرة ~10-15 دقيقة
         return
     if not (SESSION[0] <= now.hour < SESSION[1]):
         return
@@ -1104,7 +1104,7 @@ def commands():
                         threading.Thread(target=run_scalp_bt, args=(cid,), daemon=True).start()
                 elif text.startswith("/scalp_on"):
                     scalp["on"] = True
-                    reply(cid, "⚡ وضع السكالب مفعّل (يتوقف عند إعادة تشغيل السيرفر).")
+                    reply(cid, "⚡ وضع السكالب مفعّل.")
                 elif text.startswith("/scalp_off"):
                     scalp["on"] = False
                     reply(cid, "⏸️ السكالب متوقف")
@@ -1177,9 +1177,11 @@ def commands():
                     s = active["sig"]
                     t = (f"\nصفقة نشطة: {'شراء' if s['dir'] == 1 else 'بيع'} من {s['entry']:.2f}"
                          f" | SL {s['sl']:.2f} | TP {s['tp']:.2f}") if s else "\nلا صفقة نشطة"
-                    reply(cid, f"التلقائي: {'شغال' if auto['on'] else 'متوقف'}\nآخر فحص: {status['msg']}{t}")
+                    reply(cid, f"التلقائي: {'شغال' if auto['on'] else 'متوقف'}\n"
+                               f"السكالب: {'شغال ⚡' if scalp['on'] else 'متوقف'}\n"
+                               f"آخر فحص: {status['msg']}{t}")
                 elif text.startswith("/start"):
-                    reply(cid, "أهلاً! الأوامر:\n/tawsiya تحليل كامل\n/price السعر\n/levels قمة ونص وقاع شمعة امبارح\n/ai قراءة السوق بالذكاء الاصطناعي مع الأخبار\n/backtest 180 اختبار الاستراتيجية على التاريخ\n/calib 4193.5 معايرة السعر على منصتك\n/auto_on /auto_off\n/status")
+                    reply(cid, "أهلاً! الأوامر:\n/tawsiya تحليل كامل\n/price السعر\n/levels قمة ونص وقاع شمعة امبارح\n/ai قراءة السوق بالذكاء الاصطناعي مع الأخبار\n/backtest 180 اختبار الاستراتيجية على التاريخ\n/calib 4193.5 معايرة السعر على منصتك\n/auto_on /auto_off\n/scalp_on /scalp_off\n/status")
         except Exception as e:
             status["msg"] = f"cmd error: {e}"
             print(f"[commands] error: {e}", flush=True)
@@ -1203,6 +1205,11 @@ def keepalive():
 def home():
     return f"gold-bot running | {status['msg']}"
 
+
+try:
+    send(f"🔄 البوت اشتغل من جديد | السكالب: {'شغال ⚡' if scalp['on'] else 'متوقف'}")
+except Exception as e:
+    print(f"[startup] {e}", flush=True)
 
 threading.Thread(target=loop, daemon=True).start()
 threading.Thread(target=commands, daemon=True).start()
