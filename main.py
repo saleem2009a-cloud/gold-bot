@@ -503,8 +503,28 @@ def evaluate(d1, h1, h4, m15, price, hour, mom=None,
           "كسر وهمي": bool(sw), "FVG": bool(fv), "OB": bool(ob), "دورة زمنية": cyc["support"] == d,
           "منطقة 50% يومي": dc["zone"], "قرب مستوى يومي": bool(dc["near"]),
           "عكس مستوى يومي": dc["block"]}
+    elite = bool(fl["D1 يوافق"] and fl["ابتلاع H1/H4"] and not dc["block"])
+    trig = []
+    if em == d:
+        trig.append("ابتلاع M15")
+    if p1 == d:
+        trig.append("Pin Bar H1")
+    if sw:
+        trig.append("كسر وهمي")
+    zone = []
+    if ob:
+        zone.append("OB")
+    if fv:
+        zone.append("FVG")
+    if lvl is not None:
+        zone.append("دعم" if d == 1 else "مقاومة")
+    if dist <= a:
+        zone.append("EMA21")
+    if in_fib:
+        zone.append("فيبو")
+    fast = bool(not elite and fl["D1 يوافق"] and trig and zone and not dc["block"])
     r.update(dir=d, score=final, notes=notes, missing=missing, met=4 - len(missing), flags=fl,
-             elite=bool(fl["D1 يوافق"] and fl["ابتلاع H1/H4"] and not dc["block"]),
+             elite=elite, fast=fast, fast_txt=f"{' + '.join(trig)} عند {' / '.join(zone)}" if fast else "",
              need=([] if fl["D1 يوافق"] else ["D1 لا يوافق الاتجاه"]) +
                   ([] if fl["ابتلاع H1/H4"] else ["لا ابتلاع على H1/H4"]) +
                   (["السعر لاصق بمستوى امبارح المعاكس"] if dc["block"] else []),
@@ -860,6 +880,11 @@ def fmt(r, header="تحليل الذهب", full=False):
                   f"🎯 الدخول: {r['entry']:.2f}", f"🛑 الوقف: {r['sl']:.2f}",
                   f"✅ الهدف 1 (انقل الوقف للتعادل): {r['tp1']:.2f}",
                   f"💰 الهدف 2: {r['tp']:.2f} (2:1)"]
+        elif r.get("fast"):
+            L += [f"⚡ توصية سريعة: {r['fast_txt']} (أضعف من التوصية القوية، حجم أصغر)",
+                  f"🎯 الدخول: {r['entry']:.2f}", f"🛑 الوقف: {r['sl']:.2f}",
+                  f"✅ الهدف 1 (انقل الوقف للتعادل): {r['tp1']:.2f}",
+                  f"💰 الهدف 2: {r['tp']:.2f} (2:1)"]
         else:
             L.append(f"⚪ لا توصية الآن ({side.split()[0]} محتمل)، الأفضل الانتظار")
             if r.get("need"):
@@ -1038,7 +1063,7 @@ def loop():
             except Exception as e:
                 print(f"[scalp] error: {e}", flush=True)
             status["msg"] = f"سعر {r['price']:.2f} | قوة {r['score']}"
-            if (auto["on"] and r["elite"] and r["in_session"] and active["sig"] is None
+            if (auto["on"] and (r["elite"] or r.get("fast")) and r["in_session"] and active["sig"] is None
                     and (r["dir"] != last["dir"] or time.time() - last["t"] > COOLDOWN)):
                 go = True
                 if ANTHROPIC_KEY:
@@ -1055,7 +1080,7 @@ def loop():
                             send(f"🧠 المراجعة الذكية رفضت إشارة {side} عند {r['price']:.2f}: {rev['reason']}")
                         r["ai"] = rev
                 if go:
-                    send(fmt(r, "توصية جديدة"))
+                    send(fmt(r, "توصية جديدة" if r["elite"] else "توصية سريعة ⚡"))
                     now = pd.Timestamp.now(tz="UTC")
                     active.update(sig=r, t0=now, t0_orig=now, be=False)
                     last.update(dir=r["dir"], t=time.time())
@@ -1095,7 +1120,7 @@ def commands():
                 if text.startswith("/tawsiya"):
                     reply(cid, "⏳ جاري التحليل...")
                     rr = analyze()
-                    if rr["elite"] and ANTHROPIC_KEY:
+                    if (rr["elite"] or rr.get("fast")) and ANTHROPIC_KEY:
                         rr["ai"] = ai_review(rr)
                     reply(cid, fmt(rr, full=True))
                 elif text.startswith("/ai"):
