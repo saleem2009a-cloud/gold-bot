@@ -24,7 +24,22 @@ SYMBOLS = ["XAUUSD=X", "GC=F"]           # سبوت أولاً، والعقود 
 MIN_SCORE = int(os.getenv("MIN_SCORE", "80"))
 CHECK_EVERY = 120                        # فحص كل دقيقتين
 COOLDOWN = 3600
-SESSION = (7, 20)                        # ساعات لندن + نيويورك (UTC) للتوصيات التلقائية
+SESSION = (7, 20)                        # ساعات لندن + نيويورك (UTC) — للاختبارات وفي الوضع العادي
+allday = {"on": os.getenv("ALLDAY", "1") == "1"}   # توصيات على مدار الساعة (ما عدا توقف السوق اليومي)
+
+
+def live_ok(now=None):
+    """هل مسموح نطلع توصية جديدة الآن؟"""
+    now = now or pd.Timestamp.now(tz="UTC")
+    if not allday["on"]:
+        return SESSION[0] <= now.hour < SESSION[1]
+    ny = now.tz_convert("America/New_York")
+    m = ny.hour * 60 + ny.minute
+    if 16 * 60 + 45 <= m < 18 * 60 + 15:         # توقف الذهب اليومي 17:00-18:00 نيويورك + سبريد عالي حوله
+        return False
+    if ny.weekday() == 6 and m < 19 * 60:        # أول ساعة بعد افتتاح الأسبوع (فجوات وسبريد)
+        return False
+    return True
 FIB = [21, 34, 55, 89, 144]
 GANN = [90, 180, 360]
 
@@ -1391,7 +1406,7 @@ def scalp_step():
     scalp["bar"] = bar
     if now - bar > pd.Timedelta(minutes=45):          # بيانات ياهو متأخرة ~10-15 دقيقة
         return
-    if not (SESSION[0] <= now.hour < SESSION[1]):
+    if not live_ok(now):
         return
     if news_block(now):                               # خبر قوي قريب: لا صفقات سكالب جديدة
         return
@@ -1423,7 +1438,7 @@ def loop():
                              f"{' ✅ قوية' if r.get('elite') else (' ⚡ سريعة' if r.get('fast') else '')}"
                              f"{(' | ⏸️ خبر: ' + nb['title']) if nb else ''}")
             status["t"] = time.time()
-            if (auto["on"] and (r["elite"] or r.get("fast") or r.get("range")) and r["in_session"]
+            if (auto["on"] and (r["elite"] or r.get("fast") or r.get("range")) and live_ok()
                     and not nb
                     and active["sig"] is None
                     and (r["dir"] != last["dir"] or time.time() - last["t"] > COOLDOWN)):
@@ -1491,6 +1506,13 @@ def commands():
                     reply(cid, fmt(rr, full=True) + (
                         f"\n\n📰⚠️ انتبه: خبر قوي قريب ({nb['title']} {news_local(nb['t']):%H:%M}). "
                         "الأفضل عدم الدخول الآن." if nb else ""))
+                elif text.startswith("/allday_on"):
+                    allday["on"] = True
+                    reply(cid, "🌍 التوصيات على مدار الساعة (ما عدا توقف السوق اليومي 23:00-00:00 تقريباً).\n"
+                               "🕒 التوصيات خارج لندن/نيويورك بيكون مكتوب عليها 'سيولة أقل'.")
+                elif text.startswith("/allday_off"):
+                    allday["on"] = False
+                    reply(cid, "🕘 التوصيات بس بجلسة لندن + نيويورك (09:00-22:00 بتوقيت ألمانيا).")
                 elif text.startswith("/news_on"):
                     news["on"] = True
                     reply(cid, f"📰 فلتر الأخبار مفعّل ({NEWS_BEFORE} د قبل الخبر و{NEWS_AFTER} د بعده).")
@@ -1602,6 +1624,7 @@ def commands():
                          f" | SL {s['sl']:.2f} | TP {s['tp']:.2f}") if s else "\nلا صفقة نشطة"
                     reply(cid, f"التلقائي: {'شغال' if auto['on'] else 'متوقف'}\n"
                                f"السكالب: {'شغال ⚡' if scalp['on'] else 'متوقف'}\n"
+                               f"الساعات: {'على مدار الساعة 🌍' if allday['on'] else 'لندن+نيويورك فقط'}\n"
                                f"فلتر الأخبار: {'شغال 📰' if news['on'] else 'متوقف'}"
                                f"{(' ⚠️ ' + news['err']) if news['err'] else ''}\n"
                                f"البيانات: {used['sym']}"
@@ -1609,7 +1632,7 @@ def commands():
                                f"آخر فحص: {status['msg']} (قبل {int(time.time() - status.get('t', time.time()))} ثانية)"
                                f"{' ⚠️ الفحص التلقائي واقف!' if time.time() - status.get('t', time.time()) > 600 else ''}{t}")
                 elif text.startswith("/start"):
-                    reply(cid, "أهلاً! الأوامر:\n/tawsiya تحليل كامل\n/price السعر\n/levels قمة ونص وقاع شمعة امبارح\n/ai قراءة السوق بالذكاء الاصطناعي مع الأخبار\n/backtest 180 اختبار الاستراتيجية على التاريخ\n/calib 4193.5 معايرة السعر على منصتك\n/auto_on /auto_off\n/scalp_on /scalp_off\n/range_on /range_off تداول النطاق\n/news الأخبار القوية هذا الأسبوع\n/news_on /news_off فلتر الأخبار\n/stats نتائج التوصيات\n/stats_reset تصفير السجل\n/status")
+                    reply(cid, "أهلاً! الأوامر:\n/tawsiya تحليل كامل\n/price السعر\n/levels قمة ونص وقاع شمعة امبارح\n/ai قراءة السوق بالذكاء الاصطناعي مع الأخبار\n/backtest 180 اختبار الاستراتيجية على التاريخ\n/calib 4193.5 معايرة السعر على منصتك\n/auto_on /auto_off\n/scalp_on /scalp_off\n/range_on /range_off تداول النطاق\n/news الأخبار القوية هذا الأسبوع\n/news_on /news_off فلتر الأخبار\n/allday_on /allday_off توصيات على مدار الساعة\n/stats نتائج التوصيات\n/stats_reset تصفير السجل\n/status")
         except Exception as e:
             status["msg"] = f"cmd error: {e}"
             print(f"[commands] error: {e}", flush=True)
