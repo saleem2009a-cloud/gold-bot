@@ -627,7 +627,51 @@ def analyze():
            "2h": price - float(mc.iloc[-9])}
     hour = datetime.now(timezone.utc).hour
     snap["m15"], snap["h1"] = m15, h1
-    return evaluate(d1, h1, h4, m15, price, hour, mom, london_orb(m15))
+    r = evaluate(d1, h1, h4, m15, price, hour, mom, london_orb(m15))
+    if r["dir"] is None and rng_mode["on"]:
+        rg = range_eval(h1, m15, price)
+        if rg:
+            r.update(rg, score=0, met=0, notes=rg["notes"], missing=[], elite=False, fast=False,
+                     sweep=False, ob=False, fvg=None, levels=daily_levels(d1))
+    return r
+
+
+# ---------------- وضع تداول النطاق (لما H4 محايد) ----------------
+rng_mode = {"on": os.getenv("RANGE_ON", "1") == "1"}
+
+
+def range_eval(h1, m15, price):
+    """شراء قرب أرضية نطاق آخر 24 ساعة وبيع قرب سقفه، بعد ابتلاع أو رفض على M15.
+    الوقف ورا طرف النطاق، الهدف 1 نص النطاق، الهدف 2 الطرف الثاني."""
+    if len(h1) < 60 or len(m15) < 40:
+        return None
+    seg = h1.iloc[-25:-1]
+    top, bot = float(seg["High"].max()), float(seg["Low"].min())
+    a = float(atr(h1).iloc[-2])
+    width = top - bot
+    if not a > 0 or width < 2 * a or width > 8 * a or float(adx(h1).iloc[-2]) >= 25:
+        return None
+    e, p = engulf(m15), pinbar(m15)
+    pos = (price - bot) / width
+    if pos <= 0.3 and (e == 1 or p == 1):
+        d = 1
+    elif pos >= 0.7 and (e == -1 or p == -1):
+        d = -1
+    else:
+        return None
+    sl = (bot - 0.25 * a) if d == 1 else (top + 0.25 * a)
+    risk = abs(price - sl)
+    if risk < 0.5 * float(atr(m15).iloc[-2]):
+        return None
+    mid = (top + bot) / 2
+    tp = (top - 0.1 * width) if d == 1 else (bot + 0.1 * width)
+    if (tp - price) * d < 1.5 * risk:
+        return None
+    trig = ("ابتلاع" if e == d else "رفض Pin Bar") + " M15"
+    return {"dir": d, "range": True, "entry": price, "sl": sl, "sl0": sl, "tp1": mid, "tp": tp,
+            "rr": round(abs(tp - price) / risk, 1), "candle": trig,
+            "rng_txt": f"{trig} عند {'أرضية' if d == 1 else 'سقف'} النطاق {bot:.1f}-{top:.1f}",
+            "notes": [f"نطاق آخر 24 ساعة: {bot:.2f} - {top:.2f}", f"إشارة: {trig}"]}
 
 
 # ---------------- تحسين مع تقسيم تدريب/اختبار ----------------
@@ -946,7 +990,8 @@ def fmt(r, header="تحليل الذهب", full=False):
         L.append("⚪ لا توصية: لا اتجاه مشترك واضح")
     else:
         side = "بيع 🔴" if r["dir"] == -1 else "شراء 🟢"
-        L.append(f"{side} | سكور {r['score']}/100 | شروط {r['met']}/4")
+        L.append(f"{side} | 🔄 تداول نطاق (H4 محايد)" if r.get("range")
+                 else f"{side} | سكور {r['score']}/100 | شروط {r['met']}/4")
         sw_name = "كسر قاع وهمي" if r["dir"] == 1 else "كسر قمة وهمي"
         L += [f"{'🟢' if r['sweep'] else '⚪'} {sw_name if r['sweep'] else 'لا كسر وهمي'}"
               f" | OB: {'نعم' if r['ob'] else 'لا'} | FVG: {r['fvg'] or 'لا'}",
@@ -959,6 +1004,12 @@ def fmt(r, header="تحليل الذهب", full=False):
                   f"🎯 الدخول: {r['entry']:.2f}", f"🛑 الوقف: {r['sl']:.2f}",
                   f"✅ الهدف 1 (انقل الوقف للتعادل): {r['tp1']:.2f}",
                   f"💰 الهدف 2: {r['tp']:.2f} (2:1)"]
+        elif r.get("range"):
+            L += [f"🔄 توصية نطاق: {r['rng_txt']} (أضعف من توصيات الترند، حجم صغير)",
+                  f"🎯 الدخول: {r['entry']:.2f}", f"🛑 الوقف: {r['sl']:.2f}",
+                  f"✅ الهدف 1 نص النطاق (انقل الوقف للتعادل): {r['tp1']:.2f}",
+                  f"💰 الهدف 2: {r['tp']:.2f} ({r['rr']}:1)",
+                  "⚠️ إذا انكسر النطاق بقوة، اطلع فوراً."]
         elif r.get("fast"):
             L += [f"⚡ توصية سريعة: {r['fast_txt']} (أضعف من التوصية القوية، حجم أصغر)",
                   f"🎯 الدخول: {r['entry']:.2f}", f"🛑 الوقف: {r['sl']:.2f}",
@@ -983,7 +1034,7 @@ def fmt(r, header="تحليل الذهب", full=False):
 
 
 # ---------------- سجل النتائج (محفوظ برسالة مثبتة على تليجرام) ----------------
-KINDS = {"strong": "قوية 🚨", "fast": "سريعة ⚡", "scalp": "سكالب ⚡⚡"}
+KINDS = {"strong": "قوية 🚨", "fast": "سريعة ⚡", "range": "نطاق 🔄", "scalp": "سكالب ⚡⚡"}
 RES = {"tp": "🎯 هدف", "sl": "🛑 وقف", "be": "⚪ تعادل", "exp": "⌛ انتهت"}
 JTAG = "📒 سجل البوت (لا تحذف ولا تلغي تثبيت هالرسالة)\n"
 journal = {"loaded": False, "msg_id": None,
@@ -1110,8 +1161,9 @@ def track():
         last["t"] = time.time()
         active.update(sig=None)
     elif hit_tp:
-        send("🎯 تحقق الهدف النهائي! ربح 2R ✅")
-        journal_add(active.get("kind", "strong"), d, s["entry"], "tp", 2.0)
+        rr_ = abs(s["tp"] - s["entry"]) / max(abs(s["entry"] - s.get("sl0", s["entry"])), 1e-9)
+        send(f"🎯 تحقق الهدف النهائي! ربح {rr_:.1f}R ✅")
+        journal_add(active.get("kind", "strong"), d, s["entry"], "tp", round(rr_, 2))
         last["t"] = time.time()
         active.update(sig=None)
     elif reach1 and not active["be"]:
@@ -1255,7 +1307,8 @@ def loop():
             status["msg"] = (f"سعر {r['price']:.2f} | {side} | قوة {r['score']}"
                              f"{' ✅ قوية' if r.get('elite') else (' ⚡ سريعة' if r.get('fast') else '')}")
             status["t"] = time.time()
-            if (auto["on"] and (r["elite"] or r.get("fast")) and r["in_session"] and active["sig"] is None
+            if (auto["on"] and (r["elite"] or r.get("fast") or r.get("range")) and r["in_session"]
+                    and active["sig"] is None
                     and (r["dir"] != last["dir"] or time.time() - last["t"] > COOLDOWN)):
                 go = True
                 if ANTHROPIC_KEY:
@@ -1272,10 +1325,11 @@ def loop():
                             send(f"🧠 المراجعة الذكية رفضت إشارة {side} عند {r['price']:.2f}: {rev['reason']}")
                         r["ai"] = rev
                 if go:
-                    send(fmt(r, "توصية جديدة" if r["elite"] else "توصية سريعة ⚡"))
+                    send(fmt(r, "توصية جديدة" if r["elite"] else
+                             ("توصية نطاق 🔄" if r.get("range") else "توصية سريعة ⚡")))
                     now = pd.Timestamp.now(tz="UTC")
                     active.update(sig=r, t0=now, t0_orig=now, be=False,
-                                  kind="strong" if r["elite"] else "fast")
+                                  kind="strong" if r["elite"] else ("range" if r.get("range") else "fast"))
                     last.update(dir=r["dir"], t=time.time())
         except Exception as e:
             status["msg"] = f"error: {e}"
@@ -1314,7 +1368,7 @@ def commands():
                 if text.startswith("/tawsiya"):
                     reply(cid, "⏳ جاري التحليل...")
                     rr = analyze()
-                    if (rr["elite"] or rr.get("fast")) and ANTHROPIC_KEY:
+                    if (rr["elite"] or rr.get("fast") or rr.get("range")) and ANTHROPIC_KEY:
                         rr["ai"] = ai_review(rr)
                     reply(cid, fmt(rr, full=True))
                 elif text.startswith("/ai"):
@@ -1337,6 +1391,12 @@ def commands():
                     reply(cid, "🧹 تم تصفير السجل.")
                 elif text.startswith("/stats"):
                     reply(cid, stats_text())
+                elif text.startswith("/range_on"):
+                    rng_mode["on"] = True
+                    reply(cid, "🔄 وضع تداول النطاق مفعّل (بيشتغل بس لما H4 محايد).")
+                elif text.startswith("/range_off"):
+                    rng_mode["on"] = False
+                    reply(cid, "⏸️ وضع تداول النطاق متوقف.")
                 elif text.startswith("/scalp_on"):
                     scalp["on"] = True
                     reply(cid, "⚡ وضع السكالب مفعّل.")
@@ -1419,7 +1479,7 @@ def commands():
                                f"آخر فحص: {status['msg']} (قبل {int(time.time() - status.get('t', time.time()))} ثانية)"
                                f"{' ⚠️ الفحص التلقائي واقف!' if time.time() - status.get('t', time.time()) > 600 else ''}{t}")
                 elif text.startswith("/start"):
-                    reply(cid, "أهلاً! الأوامر:\n/tawsiya تحليل كامل\n/price السعر\n/levels قمة ونص وقاع شمعة امبارح\n/ai قراءة السوق بالذكاء الاصطناعي مع الأخبار\n/backtest 180 اختبار الاستراتيجية على التاريخ\n/calib 4193.5 معايرة السعر على منصتك\n/auto_on /auto_off\n/scalp_on /scalp_off\n/stats نتائج التوصيات\n/stats_reset تصفير السجل\n/status")
+                    reply(cid, "أهلاً! الأوامر:\n/tawsiya تحليل كامل\n/price السعر\n/levels قمة ونص وقاع شمعة امبارح\n/ai قراءة السوق بالذكاء الاصطناعي مع الأخبار\n/backtest 180 اختبار الاستراتيجية على التاريخ\n/calib 4193.5 معايرة السعر على منصتك\n/auto_on /auto_off\n/scalp_on /scalp_off\n/range_on /range_off تداول النطاق\n/stats نتائج التوصيات\n/stats_reset تصفير السجل\n/status")
         except Exception as e:
             status["msg"] = f"cmd error: {e}"
             print(f"[commands] error: {e}", flush=True)
