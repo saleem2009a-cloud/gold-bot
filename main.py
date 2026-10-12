@@ -1173,6 +1173,113 @@ def track():
         send(f"🔔 وصل السعر الهدف 1 ({s['tp1']:.2f}). انقل الوقف إلى الدخول {s['entry']:.2f}.")
 
 
+# ---------------- فلتر الأخبار الاقتصادية ----------------
+# المصدر: تقويم ForexFactory المجاني (JSON). نوقف التوصيات الجديدة حول الأخبار القوية للدولار.
+NEWS_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+NEWS_BEFORE = int(os.getenv("NEWS_BEFORE", "30"))     # دقائق قبل الخبر
+NEWS_AFTER = int(os.getenv("NEWS_AFTER", "30"))       # دقائق بعد الخبر
+NEWS_CCY = {c.strip().upper() for c in os.getenv("NEWS_CCY", "USD").split(",") if c.strip()}
+news = {"on": os.getenv("NEWS_ON", "1") == "1", "events": [], "t": 0, "err": "", "warned": set()}
+
+
+def news_load(force=False):
+    """يجيب أخبار الأسبوع مرة كل 3 ساعات (المصدر يحظر الطلبات الكثيرة). يحتفظ بآخر نسخة سليمة عند الفشل."""
+    if not force and news["events"] and time.time() - news["t"] < 3 * 3600:
+        return news["events"]
+    if not force and not news["events"] and news["err"] and time.time() - news["t"] < 600:
+        return news["events"]                            # فشل قبل قليل، لا نعيد بسرعة
+    try:
+        r = requests.get(NEWS_URL, timeout=20, headers={"User-Agent": "Mozilla/5.0 gold-bot"})
+        r.raise_for_status()
+        ev = []
+        for x in r.json():
+            if str(x.get("impact", "")).lower() != "high":
+                continue
+            if str(x.get("country", "")).upper() not in NEWS_CCY:
+                continue
+            try:
+                t = pd.Timestamp(x["date"]).tz_convert("UTC")
+            except Exception:
+                continue
+            ev.append({"t": t, "title": x.get("title", "?"), "ccy": x.get("country", ""),
+                       "fc": x.get("forecast") or "", "prev": x.get("previous") or ""})
+        news.update(events=sorted(ev, key=lambda e: e["t"]), t=time.time(), err="")
+        print(f"[news] loaded {len(ev)} high-impact events", flush=True)
+    except Exception as e:
+        news.update(err=str(e)[:120], t=time.time())
+        print(f"[news] error: {e}", flush=True)
+    return news["events"]
+
+
+def news_block(now=None):
+    """يرجع الخبر اللي ضمن نافذة الحظر حالياً، أو None"""
+    if not news["on"]:
+        return None
+    now = now or pd.Timestamp.now(tz="UTC")
+    for e in news_load():
+        if e["t"] - pd.Timedelta(minutes=NEWS_BEFORE) <= now <= e["t"] + pd.Timedelta(minutes=NEWS_AFTER):
+            return e
+    return None
+
+
+def news_local(t):
+    try:
+        from zoneinfo import ZoneInfo
+        return t.tz_convert(ZoneInfo(os.getenv("TZ_LOCAL", "Europe/Berlin")))
+    except Exception:
+        return t
+
+
+def news_warn():
+    """تنبيه مرة واحدة قبل كل خبر قوي، مع تذكير بالصفقات المفتوحة"""
+    if not news["on"]:
+        return
+    now = pd.Timestamp.now(tz="UTC")
+    soon = [e for e in news_load()
+            if now <= e["t"] <= now + pd.Timedelta(minutes=NEWS_BEFORE)
+            and (e["t"], e["title"]) not in news["warned"]]
+    if not soon:
+        return
+    t0 = soon[0]["t"]
+    group = [e for e in soon if e["t"] == t0]
+    for e in group:
+        news["warned"].add((e["t"], e["title"]))
+    mins = max(int((t0 - now).total_seconds() // 60), 0)
+    names = "\n".join(f"• {e['title']} ({e['ccy']})"
+                      + (f" | المتوقع {e['fc']} السابق {e['prev']}" if e["fc"] or e["prev"] else "")
+                      for e in group)
+    open_ = []
+    if active["sig"]:
+        open_.append("التوصية")
+    if scalp["sig"]:
+        open_.append("السكالب")
+    tail = (f"\n⚠️ عندك صفقة مفتوحة ({' و'.join(open_)}): فكّر بتقريب الوقف أو أخذ الربح قبل الخبر."
+            if open_ else "")
+    send(f"📰 خبر قوي بعد {mins} دقيقة ({news_local(t0):%H:%M}):\n{names}\n"
+         f"⏸️ التوصيات الجديدة متوقفة من {NEWS_BEFORE} دقيقة قبل الخبر حتى {NEWS_AFTER} دقيقة بعده.{tail}")
+
+
+def news_text():
+    ev = news_load(force=not news["events"])
+    now = pd.Timestamp.now(tz="UTC")
+    up = [e for e in ev if e["t"] >= now - pd.Timedelta(minutes=NEWS_AFTER)]
+    L = [f"📰 الأخبار القوية ({', '.join(sorted(NEWS_CCY))}) هذا الأسبوع",
+         f"الفلتر: {'شغال ✅' if news['on'] else 'متوقف ⏸️'} | يوقف التوصيات {NEWS_BEFORE} د قبل و{NEWS_AFTER} د بعد", ""]
+    if news["err"] and not ev:
+        L.append(f"⚠️ ما قدرت أجيب التقويم: {news['err']}")
+    elif not up:
+        L.append("لا أخبار قوية متبقية هذا الأسبوع.")
+    else:
+        days = {0: "الاثنين", 1: "الثلاثاء", 2: "الأربعاء", 3: "الخميس", 4: "الجمعة", 5: "السبت", 6: "الأحد"}
+        for e in up[:15]:
+            lt = news_local(e["t"])
+            L.append(f"{days[lt.weekday()]} {lt:%d.%m %H:%M} | {e['title']}")
+    b = news_block()
+    if b:
+        L += ["", f"⏸️ الآن داخل نافذة الخبر: {b['title']}"]
+    return "\n".join(L)
+
+
 # ---------------- تليجرام ----------------
 def send(text):
     if not TOKEN or not CHAT:
@@ -1286,6 +1393,8 @@ def scalp_step():
         return
     if not (SESSION[0] <= now.hour < SESSION[1]):
         return
+    if news_block(now):                               # خبر قوي قريب: لا صفقات سكالب جديدة
+        return
     r = scalp_eval(m15, h1, float(m15["Close"].iloc[-1]))
     if r:
         side = "شراء 🟢" if r["dir"] == 1 else "بيع 🔴"
@@ -1299,16 +1408,23 @@ def loop():
     while True:
         try:
             track()
+            try:
+                news_warn()
+            except Exception as e:
+                print(f"[news] warn error: {e}", flush=True)
             r = analyze()
             try:
                 scalp_step()
             except Exception as e:
                 print(f"[scalp] error: {e}", flush=True)
+            nb = news_block()
             side = {1: "شراء", -1: "بيع"}.get(r["dir"], "لا اتجاه مشترك D1/H4")
             status["msg"] = (f"سعر {r['price']:.2f} | {side} | قوة {r['score']}"
-                             f"{' ✅ قوية' if r.get('elite') else (' ⚡ سريعة' if r.get('fast') else '')}")
+                             f"{' ✅ قوية' if r.get('elite') else (' ⚡ سريعة' if r.get('fast') else '')}"
+                             f"{(' | ⏸️ خبر: ' + nb['title']) if nb else ''}")
             status["t"] = time.time()
             if (auto["on"] and (r["elite"] or r.get("fast") or r.get("range")) and r["in_session"]
+                    and not nb
                     and active["sig"] is None
                     and (r["dir"] != last["dir"] or time.time() - last["t"] > COOLDOWN)):
                 go = True
@@ -1371,7 +1487,18 @@ def commands():
                     rr = analyze()
                     if (rr["elite"] or rr.get("fast") or rr.get("range")) and ANTHROPIC_KEY:
                         rr["ai"] = ai_review(rr)
-                    reply(cid, fmt(rr, full=True))
+                    nb = news_block()
+                    reply(cid, fmt(rr, full=True) + (
+                        f"\n\n📰⚠️ انتبه: خبر قوي قريب ({nb['title']} {news_local(nb['t']):%H:%M}). "
+                        "الأفضل عدم الدخول الآن." if nb else ""))
+                elif text.startswith("/news_on"):
+                    news["on"] = True
+                    reply(cid, f"📰 فلتر الأخبار مفعّل ({NEWS_BEFORE} د قبل الخبر و{NEWS_AFTER} د بعده).")
+                elif text.startswith("/news_off"):
+                    news["on"] = False
+                    reply(cid, "⏸️ فلتر الأخبار متوقف (التوصيات بتطلع حتى وقت الأخبار).")
+                elif text.startswith("/news"):
+                    reply(cid, news_text())
                 elif text.startswith("/ai"):
                     if not ANTHROPIC_KEY:
                         reply(cid, "أضف ANTHROPIC_API_KEY في Environment على Render لتفعيل العقل الذكي.")
@@ -1475,12 +1602,14 @@ def commands():
                          f" | SL {s['sl']:.2f} | TP {s['tp']:.2f}") if s else "\nلا صفقة نشطة"
                     reply(cid, f"التلقائي: {'شغال' if auto['on'] else 'متوقف'}\n"
                                f"السكالب: {'شغال ⚡' if scalp['on'] else 'متوقف'}\n"
+                               f"فلتر الأخبار: {'شغال 📰' if news['on'] else 'متوقف'}"
+                               f"{(' ⚠️ ' + news['err']) if news['err'] else ''}\n"
                                f"البيانات: {used['sym']}"
                                f"{(' ⚠️ ' + td_err['msg']) if TD_KEY and td_err['msg'] else ''}\n"
                                f"آخر فحص: {status['msg']} (قبل {int(time.time() - status.get('t', time.time()))} ثانية)"
                                f"{' ⚠️ الفحص التلقائي واقف!' if time.time() - status.get('t', time.time()) > 600 else ''}{t}")
                 elif text.startswith("/start"):
-                    reply(cid, "أهلاً! الأوامر:\n/tawsiya تحليل كامل\n/price السعر\n/levels قمة ونص وقاع شمعة امبارح\n/ai قراءة السوق بالذكاء الاصطناعي مع الأخبار\n/backtest 180 اختبار الاستراتيجية على التاريخ\n/calib 4193.5 معايرة السعر على منصتك\n/auto_on /auto_off\n/scalp_on /scalp_off\n/range_on /range_off تداول النطاق\n/stats نتائج التوصيات\n/stats_reset تصفير السجل\n/status")
+                    reply(cid, "أهلاً! الأوامر:\n/tawsiya تحليل كامل\n/price السعر\n/levels قمة ونص وقاع شمعة امبارح\n/ai قراءة السوق بالذكاء الاصطناعي مع الأخبار\n/backtest 180 اختبار الاستراتيجية على التاريخ\n/calib 4193.5 معايرة السعر على منصتك\n/auto_on /auto_off\n/scalp_on /scalp_off\n/range_on /range_off تداول النطاق\n/news الأخبار القوية هذا الأسبوع\n/news_on /news_off فلتر الأخبار\n/stats نتائج التوصيات\n/stats_reset تصفير السجل\n/status")
         except Exception as e:
             status["msg"] = f"cmd error: {e}"
             print(f"[commands] error: {e}", flush=True)
