@@ -903,6 +903,108 @@ def fmt(r, header="تحليل الذهب", full=False):
     return "\n".join(L)
 
 
+# ---------------- سجل النتائج (محفوظ برسالة مثبتة على تليجرام) ----------------
+KINDS = {"strong": "قوية 🚨", "fast": "سريعة ⚡", "scalp": "سكالب ⚡⚡"}
+RES = {"tp": "🎯 هدف", "sl": "🛑 وقف", "be": "⚪ تعادل", "exp": "⌛ انتهت"}
+JTAG = "📒 سجل البوت (لا تحذف ولا تلغي تثبيت هالرسالة)\n"
+journal = {"loaded": False, "msg_id": None,
+           "db": {"k": {k: {"tp": 0, "sl": 0, "be": 0, "exp": 0, "R": 0.0} for k in KINDS}, "last": []}}
+
+
+def tg(method, **data):
+    try:
+        return requests.post(f"https://api.telegram.org/bot{TOKEN}/{method}", data=data, timeout=15).json()
+    except Exception as e:
+        print(f"[journal] {method}: {e}", flush=True)
+        return {}
+
+
+def journal_load():
+    """يقرأ السجل من الرسالة المثبتة (لأن ملفات Render المجاني بتنمسح مع كل إعادة تشغيل)"""
+    if journal["loaded"] or not TOKEN or not CHAT:
+        return
+    journal["loaded"] = True
+    pm = (tg("getChat", chat_id=CHAT).get("result") or {}).get("pinned_message") or {}
+    txt = pm.get("text") or ""
+    if txt.startswith(JTAG.strip()[:12]):
+        try:
+            db = json.loads(txt[txt.index("{"):])
+            for k in KINDS:
+                db["k"].setdefault(k, {"tp": 0, "sl": 0, "be": 0, "exp": 0, "R": 0.0})
+            journal["db"], journal["msg_id"] = db, pm.get("message_id")
+            print("[journal] loaded from pinned message", flush=True)
+        except Exception as e:
+            print(f"[journal] parse error: {e}", flush=True)
+
+
+def journal_save():
+    if not TOKEN or not CHAT:
+        return
+    txt = JTAG + json.dumps(journal["db"], ensure_ascii=False, separators=(",", ":"))
+    if journal["msg_id"]:
+        r = tg("editMessageText", chat_id=CHAT, message_id=journal["msg_id"], text=txt)
+        if r.get("ok") or "not modified" in str(r.get("description", "")):
+            return
+    r = tg("sendMessage", chat_id=CHAT, text=txt, disable_notification=True)
+    mid = (r.get("result") or {}).get("message_id")
+    if mid:
+        journal["msg_id"] = mid
+        tg("pinChatMessage", chat_id=CHAT, message_id=mid, disable_notification=True)
+
+
+def journal_add(kind, d, entry, res, r_mult):
+    try:
+        journal_load()
+        db = journal["db"]
+        k = db["k"][kind]
+        k[res] += 1
+        k["R"] = round(k["R"] + r_mult, 2)
+        db["last"].append([kind, d, round(entry, 1), res, round(r_mult, 2),
+                           local_now().strftime("%m-%d %H:%M")])
+        db["last"] = db["last"][-20:]
+        journal_save()
+    except Exception as e:
+        print(f"[journal] add error: {e}", flush=True)
+
+
+def local_now():
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.now(ZoneInfo(os.getenv("TZ_LOCAL", "Europe/Berlin")))
+    except Exception:
+        return datetime.now(timezone.utc)
+
+
+def mtm(s, risk_key="risk"):
+    """ربح/خسارة الصفقة بالـR عند انتهاء صلاحيتها، حسب السعر الحالي"""
+    try:
+        p = float(get("15m", "1d")["Close"].iloc[-1])
+        risk = s.get(risk_key) or abs(s["entry"] - s.get("sl0", s["sl"]))
+        return (p - s["entry"]) * s["dir"] / risk if risk else 0.0
+    except Exception:
+        return 0.0
+
+
+def stats_text():
+    journal_load()
+    db = journal["db"]
+    L = ["📒 نتائج التوصيات (من وقت ما بلّش السجل)", ""]
+    for k, name in KINDS.items():
+        x = db["k"][k]
+        n = x["tp"] + x["sl"] + x["be"] + x["exp"]
+        if not n:
+            L.append(f"{name}: لا صفقات بعد")
+            continue
+        L.append(f"{name}: {n} صفقة | 🎯{x['tp']} 🛑{x['sl']} ⚪{x['be']} ⌛{x['exp']}")
+        L.append(f"   نسبة النجاح {100 * x['tp'] / n:.0f}% | المجموع {x['R']:+.1f}R | المتوسط {x['R'] / n:+.2f}R")
+    if db["last"]:
+        L += ["", "آخر الصفقات:"]
+        for kind, d, e, res, rm, t in db["last"][-10:][::-1]:
+            L.append(f"{t} | {KINDS[kind].split()[0]} {'شراء' if d == 1 else 'بيع'} {e} | {RES[res]} ({rm:+.1f}R)")
+    L += ["", "1R = مسافة الوقف. المتوسط فوق الصفر بعد 30 صفقة على الأقل = علامة جيدة."]
+    return "\n".join(L)
+
+
 # ---------------- تتبع الصفقة ----------------
 def track():
     s = active["sig"]
@@ -911,6 +1013,7 @@ def track():
     now = pd.Timestamp.now(tz="UTC")
     if now - active["t0_orig"] > pd.Timedelta(hours=24):
         send("⌛ انتهت صلاحية التوصية (24 ساعة). تجاهلها وانتظر إعداداً جديداً.")
+        journal_add(active.get("kind", "strong"), s["dir"], s["entry"], "exp", mtm(s))
         active.update(sig=None)
         return
     m = get("15m", "1d")
@@ -923,10 +1026,13 @@ def track():
     reach1 = hi >= s["tp1"] if d == 1 else lo <= s["tp1"]
     if hit_sl:
         send("🛑 ضرب وقف الخسارة." if not active["be"] else "⚪ خرجت عند التعادل (الوقف المنقول).")
+        journal_add(active.get("kind", "strong"), d, s["entry"], "be" if active["be"] else "sl",
+                    0.0 if active["be"] else -1.0)
         last["t"] = time.time()
         active.update(sig=None)
     elif hit_tp:
         send("🎯 تحقق الهدف النهائي! ربح 2R ✅")
+        journal_add(active.get("kind", "strong"), d, s["entry"], "tp", 2.0)
         last["t"] = time.time()
         active.update(sig=None)
     elif reach1 and not active["be"]:
@@ -1020,6 +1126,7 @@ def scalp_step():
     if s:
         if now - scalp["t_orig"] > pd.Timedelta(hours=4):
             send("⌛ انتهت صلاحية صفقة السكالب (4 ساعات).")
+            journal_add("scalp", s["dir"], s["entry"], "exp", mtm(s))
             scalp["sig"] = None
         else:
             bars = m15[m15.index > scalp["t0"]]
@@ -1027,9 +1134,12 @@ def scalp_step():
                 hi, lo, d = float(bars["High"].max()), float(bars["Low"].min()), s["dir"]
                 if (lo <= s["sl"]) if d == 1 else (hi >= s["sl"]):
                     send("⚡🛑 السكالب: ضرب الوقف." if not scalp["be"] else "⚡⚪ السكالب: خروج عند التعادل.")
+                    journal_add("scalp", d, s["entry"], "be" if scalp["be"] else "sl",
+                                0.0 if scalp["be"] else -1.0)
                     scalp["sig"] = None
                 elif (hi >= s["tp"]) if d == 1 else (lo <= s["tp"]):
                     send("⚡🎯 السكالب: تحقق الهدف 2 (+2R) ✅")
+                    journal_add("scalp", d, s["entry"], "tp", 2.0)
                     scalp["sig"] = None
                 elif not scalp["be"] and ((hi >= s["tp1"]) if d == 1 else (lo <= s["tp1"])):
                     s["sl"] = s["entry"]
@@ -1082,7 +1192,8 @@ def loop():
                 if go:
                     send(fmt(r, "توصية جديدة" if r["elite"] else "توصية سريعة ⚡"))
                     now = pd.Timestamp.now(tz="UTC")
-                    active.update(sig=r, t0=now, t0_orig=now, be=False)
+                    active.update(sig=r, t0=now, t0_orig=now, be=False,
+                                  kind="strong" if r["elite"] else "fast")
                     last.update(dir=r["dir"], t=time.time())
         except Exception as e:
             status["msg"] = f"error: {e}"
@@ -1135,6 +1246,14 @@ def commands():
                     else:
                         bt["running"] = True
                         threading.Thread(target=run_scalp_bt, args=(cid,), daemon=True).start()
+                elif text.startswith("/stats_reset"):
+                    journal_load()
+                    journal["db"] = {"k": {k: {"tp": 0, "sl": 0, "be": 0, "exp": 0, "R": 0.0} for k in KINDS},
+                                     "last": []}
+                    journal_save()
+                    reply(cid, "🧹 تم تصفير السجل.")
+                elif text.startswith("/stats"):
+                    reply(cid, stats_text())
                 elif text.startswith("/scalp_on"):
                     scalp["on"] = True
                     reply(cid, "⚡ وضع السكالب مفعّل.")
@@ -1214,7 +1333,7 @@ def commands():
                                f"السكالب: {'شغال ⚡' if scalp['on'] else 'متوقف'}\n"
                                f"آخر فحص: {status['msg']}{t}")
                 elif text.startswith("/start"):
-                    reply(cid, "أهلاً! الأوامر:\n/tawsiya تحليل كامل\n/price السعر\n/levels قمة ونص وقاع شمعة امبارح\n/ai قراءة السوق بالذكاء الاصطناعي مع الأخبار\n/backtest 180 اختبار الاستراتيجية على التاريخ\n/calib 4193.5 معايرة السعر على منصتك\n/auto_on /auto_off\n/scalp_on /scalp_off\n/status")
+                    reply(cid, "أهلاً! الأوامر:\n/tawsiya تحليل كامل\n/price السعر\n/levels قمة ونص وقاع شمعة امبارح\n/ai قراءة السوق بالذكاء الاصطناعي مع الأخبار\n/backtest 180 اختبار الاستراتيجية على التاريخ\n/calib 4193.5 معايرة السعر على منصتك\n/auto_on /auto_off\n/scalp_on /scalp_off\n/stats نتائج التوصيات\n/stats_reset تصفير السجل\n/status")
         except Exception as e:
             status["msg"] = f"cmd error: {e}"
             print(f"[commands] error: {e}", flush=True)
