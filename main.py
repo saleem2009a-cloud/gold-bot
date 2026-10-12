@@ -2,7 +2,7 @@ import os, time, json, threading
 from datetime import datetime, timezone, timedelta
 import requests
 import pandas as pd
-import yfinance as yf
+import gc
 from flask import Flask
 
 
@@ -52,7 +52,8 @@ OHLC = {"Open": "first", "High": "max", "Low": "min", "Close": "last"}
 # ---- بيانات فورية من Twelve Data (مجاني: 800 طلب/يوم، 8/دقيقة) إذا انضاف المفتاح ----
 TD_KEY = env("TWELVEDATA_KEY", "TWELVE_DATA_KEY", "TD_KEY")
 TD_INT = {"5m": ("5min", 170), "15m": ("15min", 170), "1h": ("1h", 900), "1d": ("1day", 3600)}
-TD_MAX_DAYS = {"5m": 5, "15m": 10, "1h": 150, "1d": 1500}
+TD_SIZE = {"5min": 400, "15min": 1000, "1h": 1500, "1day": 800}   # قد الحاجة بس، لتوفير الذاكرة
+TD_MAX_DAYS = {"5m": 1, "15m": 10, "1h": 60, "1d": 1000}
 _td = {}
 td_err = {"msg": "", "t": 0}
 
@@ -74,7 +75,7 @@ def td_fetch(tdi):
         time.sleep(61 - (now - _td_calls[0]))
     _td_calls.append(time.time())
     j = requests.get("https://api.twelvedata.com/time_series",
-                     params={"symbol": "XAU/USD", "interval": tdi, "outputsize": 5000,
+                     params={"symbol": "XAU/USD", "interval": tdi, "outputsize": TD_SIZE[tdi],
                              "timezone": "UTC", "order": "asc", "apikey": TD_KEY},
                      timeout=20).json()
     vals = j.get("values")
@@ -119,6 +120,7 @@ def get_raw(interval, period):
         return df
     for sym in SYMBOLS:
         try:
+            import yfinance as yf                    # تحميل عند الحاجة فقط (توفير ذاكرة)
             df = yf.download(sym, interval=interval, period=period,
                              progress=False, auto_adjust=True, timeout=20)
             if isinstance(df.columns, pd.MultiIndex):
@@ -1278,6 +1280,7 @@ def loop():
         except Exception as e:
             status["msg"] = f"error: {e}"
             print(f"[loop] error: {e}", flush=True)
+        gc.collect()
         time.sleep(CHECK_EVERY)
 
 
