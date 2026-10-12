@@ -35,7 +35,7 @@ auto = {"on": True}
 active = {"sig": None, "t0": None, "be": False}
 _cache = {}
 used = {"sym": None}
-offset = {"auto": 0.0, "manual": 0.0}
+offset = {"auto": 0.0, "manual": 0.0, "n": 0}
 daily = {"d": None, "n": 0}
 ai_state = {"dir": None, "t": 0, "rejected": False}
 ai_err = {"msg": ""}
@@ -83,13 +83,21 @@ def spot_price():
 
 
 def refresh_offset(raw_last):
-    """إذا اضطررنا لاستخدام العقود الآجلة نصحح الفرق بسعر السبوت الحي"""
-    if used["sym"] == "GC=F":
-        sp = spot_price()
-        if sp:
-            offset["auto"] = sp - raw_last
-    else:
-        offset["auto"] = 0.0
+    """إذا اضطررنا لاستخدام العقود الآجلة نصحح الفرق بسعر السبوت الحي.
+    الفرق بيتنعّم تدريجياً لأن بيانات العقود متأخرة ~10 دقائق والسبوت حي،
+    فالفرق اللحظي بيقفز مع كل حركة وبيحرّك كل المستويات (قمة/قاع امبارح) معه."""
+    if used["sym"] != "GC=F":
+        offset["auto"], offset["n"] = 0.0, 0
+        return
+    sp = spot_price()
+    if not sp:
+        return
+    new = sp - raw_last
+    if offset.get("n", 0) == 0:
+        offset["auto"] = new
+    elif abs(new - offset["auto"]) <= 25:          # تجاهل القفزات الشاذة
+        offset["auto"] = 0.9 * offset["auto"] + 0.1 * new
+    offset["n"] = offset.get("n", 0) + 1
 
 
 def shift(df):
