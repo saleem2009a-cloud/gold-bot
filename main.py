@@ -61,35 +61,53 @@ def period_days(period):
     return int(period[:-1]) * (365 if period.endswith("y") else 1)
 
 
+_td_lock = threading.Lock()
+_td_calls = []
+
+
+def td_fetch(tdi):
+    """طلب واحد مع احترام حد 8 طلبات بالدقيقة (نوقف عند 7 للأمان)"""
+    now = time.time()
+    while _td_calls and now - _td_calls[0] > 60:
+        _td_calls.pop(0)
+    if len(_td_calls) >= 7:
+        time.sleep(61 - (now - _td_calls[0]))
+    _td_calls.append(time.time())
+    j = requests.get("https://api.twelvedata.com/time_series",
+                     params={"symbol": "XAU/USD", "interval": tdi, "outputsize": 5000,
+                             "timezone": "UTC", "order": "asc", "apikey": TD_KEY},
+                     timeout=20).json()
+    vals = j.get("values")
+    if not vals:
+        raise RuntimeError(str(j.get("message", j))[:200])
+    df = pd.DataFrame(vals)
+    df.index = pd.DatetimeIndex(pd.to_datetime(df["datetime"])).tz_localize("UTC")
+    df = df[["open", "high", "low", "close"]].astype(float)
+    df.columns = ["Open", "High", "Low", "Close"]
+    return df.sort_index()
+
+
 def td_raw(interval, period):
-    """يرجع شموع XAU/USD الفورية، أو None ليرجع البوت لـ Yahoo"""
+    """شموع XAU/USD الفورية. إذا فشل طلب، منستخدم آخر نسخة محفوظة بدل ما نخلط مع Yahoo."""
     if not TD_KEY or interval not in TD_INT or period_days(period) > TD_MAX_DAYS[interval]:
         return None
-    if time.time() - td_err["t"] < 300:          # بعد خطأ، استنى 5 دقائق قبل المحاولة من جديد
-        return None
     tdi, ttl = TD_INT[interval]
-    if interval in _td and time.time() - _td[interval][0] < ttl:
-        df = _td[interval][1]
-    else:
-        try:
-            j = requests.get("https://api.twelvedata.com/time_series",
-                             params={"symbol": "XAU/USD", "interval": tdi, "outputsize": 5000,
-                                     "timezone": "UTC", "order": "asc", "apikey": TD_KEY},
-                             timeout=20).json()
-            vals = j.get("values")
-            if not vals:
-                raise RuntimeError(str(j.get("message", j))[:200])
-            df = pd.DataFrame(vals)
-            df.index = pd.to_datetime(df["datetime"]).dt.tz_localize("UTC")
-            df = df[["open", "high", "low", "close"]].astype(float)
-            df.columns = ["Open", "High", "Low", "Close"]
-            df = df.sort_index()
-            _td[interval] = (time.time(), df)
-            td_err["msg"] = ""
-        except Exception as e:
-            td_err.update(msg=str(e)[:200], t=time.time())
-            print(f"[twelvedata] {interval}: {e}", flush=True)
-            return None
+    with _td_lock:                                  # طلب واحد بنفس الوقت (الحلقة + أوامر تليجرام)
+        cached = _td.get(interval)
+        fresh = cached and time.time() - cached[0] < ttl
+        retry_ok = time.time() - td_err.get(interval, 0) > 60
+        if not fresh and (retry_ok or not cached):
+            try:
+                _td[interval] = (time.time(), td_fetch(tdi))
+                td_err["msg"] = ""
+            except Exception as e:
+                td_err.update(msg=str(e)[:200], t=time.time())
+                td_err[interval] = time.time()
+                print(f"[twelvedata] {interval}: {e}", flush=True)
+        cached = _td.get(interval)
+    if not cached or time.time() - cached[0] > 1800:   # ما في بيانات فورية صالحة → Yahoo
+        return None
+    df = cached[1]
     cut = df.index[-1] - pd.Timedelta(days=period_days(period))
     used["sym"] = "XAU/USD (فوري)"
     return df[df.index >= cut]
@@ -102,7 +120,7 @@ def get_raw(interval, period):
     for sym in SYMBOLS:
         try:
             df = yf.download(sym, interval=interval, period=period,
-                             progress=False, auto_adjust=True)
+                             progress=False, auto_adjust=True, timeout=20)
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.get_level_values(0)
             df = df.dropna()
@@ -1222,6 +1240,7 @@ def loop():
             except Exception as e:
                 print(f"[scalp] error: {e}", flush=True)
             status["msg"] = f"سعر {r['price']:.2f} | قوة {r['score']}"
+            status["t"] = time.time()
             if (auto["on"] and (r["elite"] or r.get("fast")) and r["in_session"] and active["sig"] is None
                     and (r["dir"] != last["dir"] or time.time() - last["t"] > COOLDOWN)):
                 go = True
@@ -1382,7 +1401,8 @@ def commands():
                                f"السكالب: {'شغال ⚡' if scalp['on'] else 'متوقف'}\n"
                                f"البيانات: {used['sym']}"
                                f"{(' ⚠️ ' + td_err['msg']) if TD_KEY and td_err['msg'] else ''}\n"
-                               f"آخر فحص: {status['msg']}{t}")
+                               f"آخر فحص: {status['msg']} (قبل {int(time.time() - status.get('t', time.time()))} ثانية)"
+                               f"{' ⚠️ الفحص التلقائي واقف!' if time.time() - status.get('t', time.time()) > 600 else ''}{t}")
                 elif text.startswith("/start"):
                     reply(cid, "أهلاً! الأوامر:\n/tawsiya تحليل كامل\n/price السعر\n/levels قمة ونص وقاع شمعة امبارح\n/ai قراءة السوق بالذكاء الاصطناعي مع الأخبار\n/backtest 180 اختبار الاستراتيجية على التاريخ\n/calib 4193.5 معايرة السعر على منصتك\n/auto_on /auto_off\n/scalp_on /scalp_off\n/stats نتائج التوصيات\n/stats_reset تصفير السجل\n/status")
         except Exception as e:
