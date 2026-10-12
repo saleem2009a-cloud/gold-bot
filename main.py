@@ -49,7 +49,56 @@ SPREAD = 0.35                            # تكلفة تقريبية بالدو�
 OHLC = {"Open": "first", "High": "max", "Low": "min", "Close": "last"}
 
 
+# ---- بيانات فورية من Twelve Data (مجاني: 800 طلب/يوم، 8/دقيقة) إذا انضاف المفتاح ----
+TD_KEY = env("TWELVEDATA_KEY", "TWELVE_DATA_KEY", "TD_KEY")
+TD_INT = {"5m": ("5min", 170), "15m": ("15min", 170), "1h": ("1h", 900), "1d": ("1day", 3600)}
+TD_MAX_DAYS = {"5m": 5, "15m": 10, "1h": 150, "1d": 1500}
+_td = {}
+td_err = {"msg": "", "t": 0}
+
+
+def period_days(period):
+    return int(period[:-1]) * (365 if period.endswith("y") else 1)
+
+
+def td_raw(interval, period):
+    """يرجع شموع XAU/USD الفورية، أو None ليرجع البوت لـ Yahoo"""
+    if not TD_KEY or interval not in TD_INT or period_days(period) > TD_MAX_DAYS[interval]:
+        return None
+    if time.time() - td_err["t"] < 300:          # بعد خطأ، استنى 5 دقائق قبل المحاولة من جديد
+        return None
+    tdi, ttl = TD_INT[interval]
+    if interval in _td and time.time() - _td[interval][0] < ttl:
+        df = _td[interval][1]
+    else:
+        try:
+            j = requests.get("https://api.twelvedata.com/time_series",
+                             params={"symbol": "XAU/USD", "interval": tdi, "outputsize": 5000,
+                                     "timezone": "UTC", "order": "asc", "apikey": TD_KEY},
+                             timeout=20).json()
+            vals = j.get("values")
+            if not vals:
+                raise RuntimeError(str(j.get("message", j))[:200])
+            df = pd.DataFrame(vals)
+            df.index = pd.to_datetime(df["datetime"]).dt.tz_localize("UTC")
+            df = df[["open", "high", "low", "close"]].astype(float)
+            df.columns = ["Open", "High", "Low", "Close"]
+            df = df.sort_index()
+            _td[interval] = (time.time(), df)
+            td_err["msg"] = ""
+        except Exception as e:
+            td_err.update(msg=str(e)[:200], t=time.time())
+            print(f"[twelvedata] {interval}: {e}", flush=True)
+            return None
+    cut = df.index[-1] - pd.Timedelta(days=period_days(period))
+    used["sym"] = "XAU/USD (فوري)"
+    return df[df.index >= cut]
+
+
 def get_raw(interval, period):
+    df = td_raw(interval, period)
+    if df is not None and len(df) >= 5:
+        return df
     for sym in SYMBOLS:
         try:
             df = yf.download(sym, interval=interval, period=period,
@@ -1331,6 +1380,8 @@ def commands():
                          f" | SL {s['sl']:.2f} | TP {s['tp']:.2f}") if s else "\nلا صفقة نشطة"
                     reply(cid, f"التلقائي: {'شغال' if auto['on'] else 'متوقف'}\n"
                                f"السكالب: {'شغال ⚡' if scalp['on'] else 'متوقف'}\n"
+                               f"البيانات: {used['sym']}"
+                               f"{(' ⚠️ ' + td_err['msg']) if TD_KEY and td_err['msg'] else ''}\n"
                                f"آخر فحص: {status['msg']}{t}")
                 elif text.startswith("/start"):
                     reply(cid, "أهلاً! الأوامر:\n/tawsiya تحليل كامل\n/price السعر\n/levels قمة ونص وقاع شمعة امبارح\n/ai قراءة السوق بالذكاء الاصطناعي مع الأخبار\n/backtest 180 اختبار الاستراتيجية على التاريخ\n/calib 4193.5 معايرة السعر على منصتك\n/auto_on /auto_off\n/scalp_on /scalp_off\n/stats نتائج التوصيات\n/stats_reset تصفير السجل\n/status")
@@ -1359,7 +1410,8 @@ def home():
 
 
 try:
-    send(f"🔄 البوت اشتغل من جديد | السكالب: {'شغال ⚡' if scalp['on'] else 'متوقف'}")
+    send(f"🔄 البوت اشتغل من جديد | السكالب: {'شغال ⚡' if scalp['on'] else 'متوقف'}"
+         f" | البيانات: {'فورية (Twelve Data)' if TD_KEY else 'Yahoo (متأخرة ~10 دقائق)'}")
 except Exception as e:
     print(f"[startup] {e}", flush=True)
 
