@@ -1325,8 +1325,20 @@ def send(text):
 
 
 def reply(chat_id, text):
-    requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage",
-                  data={"chat_id": chat_id, "text": text}, timeout=15)
+    """بيقسم الرسائل الطويلة، وبيعيد المحاولة إذا فشل الإرسال (حتى ما تضيع نتيجة اختبار)"""
+    text = str(text)
+    parts = [text[i:i + 3500] for i in range(0, len(text), 3500)] or [""]
+    for part in parts:
+        for attempt in range(3):
+            try:
+                j = requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage",
+                                  data={"chat_id": chat_id, "text": part}, timeout=20).json()
+                if j.get("ok"):
+                    break
+                print(f"[reply] telegram error: {j}", flush=True)
+            except Exception as e:
+                print(f"[reply] error: {e}", flush=True)
+            time.sleep(3)
 
 
 # ---------------- وضع الصفقات السريعة (سكالب) ----------------
@@ -1465,14 +1477,24 @@ def run_scalp_bt(cid):
         reply(cid, "⏳ اختبار نسخ السكالب (M15 + M5) والنطاق على آخر ~60 يوم. ممكن ياخد 5-10 دقائق...")
         variants = [("base", "e", 1.2), ("pin", "ep", 1.2), ("e15", "e", 1.5), ("pin15", "ep", 1.5), ("loose", "ep", 2.0)]
 
+        pre = {}
+
         def step15(raw, i):
-            w = raw.iloc[max(0, i - 1200):i + 1].copy()
+            if "h1" not in pre:                       # الفريمات الكبيرة مرة وحدة بدل كل شمعة (أسرع بكتير)
+                pre["h1"] = raw.resample("1h").agg(OHLC).dropna()
+                pre["h4"] = raw.resample("4h").agg(OHLC).dropna()
+            w = raw.iloc[max(0, i - 300):i + 1].copy()
             o = float(w["Open"].iloc[-1])
             for k in ("Open", "High", "Low", "Close"):
                 w.iloc[-1, w.columns.get_loc(k)] = o
-            h1 = w.resample("1h").agg(OHLC).dropna()
+            t_i = raw.index[i]
+            def upto(big, fr, n):                     # الشموع المكتملة + الشمعة الحالية من شموع M15 لحد هلأ (بدون نظر للمستقبل)
+                st = t_i.floor(fr)
+                done = big[big.index < st].iloc[-n:]
+                cur = w[w.index >= st].resample(fr).agg(OHLC).dropna()
+                return pd.concat([done, cur])
+            h1, h4 = upto(pre["h1"], "1h", 300), upto(pre["h4"], "4h", 120)
             sigs = [(v, scalp_eval(w, h1, o, trig=t, emad=e), 16) for v, t, e in variants]
-            h4 = w.resample("4h").agg(OHLC).dropna()
             if len(h4) >= 60:
                 sigs.append(("trend", trend_eval(w, h1, o, [trend(h4)]), 16))
                 sigs.append(("brt", brt_eval(w, h1, o, [trend(h4)]), 16))
@@ -1486,6 +1508,7 @@ def run_scalp_bt(cid):
         slots = {v: [(v, 1)] for v, _, _ in variants}
         slots["base"] = [("base", 1), ("base2", 2)]       # نفس الشروط بس صفقتين بنفس الوقت
         r15 = _bt_pass(raw, step15, 16, slots)
+        reply(cid, "⏳ خلص M15، هلأ عم يختبر M5...")
 
         def step5(raw, i):
             w = raw.iloc[max(0, i - 900):i + 1].copy()
@@ -1517,10 +1540,10 @@ def run_scalp_bt(cid):
         for k, title, dd in names:
             r = allr.get(k, [])
             h = len(r) // 2
-            ok = r and stats(r[:h])["avg"] > 0 and stats(r[h:])["avg"] > 0 if h else False
+            ok = bool(h and stats(r[:h])["avg"] > 0 and stats(r[h:])["avg"] > 0)
             L += ["", f"{'✅' if ok else '❌'} {title}",
                   f"{line(r)} | ~{len(r) / dd * 7:.1f}/أسبوع"]
-            if r:
+            if h:
                 L.append(f"   نص1 {stats(r[:h])['avg']:+.2f}R | نص2 {stats(r[h:])['avg']:+.2f}R")
         if "err" in r5:
             L.append(f"\n⚠️ M5 ما اشتغل: {r5['err']}")
@@ -1532,7 +1555,45 @@ def run_scalp_bt(cid):
         bt["running"] = False
 
 
+def scalp_persist():
+    """بيحفظ صفقة السكالب المفتوحة بالسجل المثبت، حتى ما ينساها البوت إذا أعاد التشغيل"""
+    try:
+        journal_load()
+        s = scalp["sig"]
+        journal["db"]["scalp_open"] = None if not s else {
+            "sig": {k: (float(v) if isinstance(v, (int, float)) else v) for k, v in s.items()},
+            "kind": scalp.get("kind", "scalp"), "be": scalp["be"],
+            "t0": scalp["t0"].isoformat(), "t_orig": scalp["t_orig"].isoformat()}
+        journal_save()
+    except Exception as e:
+        print(f"[scalp] persist error: {e}", flush=True)
+
+
+def scalp_restore():
+    try:
+        journal_load()
+        o = journal["db"].get("scalp_open")
+        if not o:
+            return
+        t_orig = pd.Timestamp(o["t_orig"])
+        if pd.Timestamp.now(tz="UTC") - t_orig > pd.Timedelta(hours=4):
+            return
+        scalp.update(sig=o["sig"], kind=o["kind"], be=o["be"], t0=pd.Timestamp(o["t0"]), t_orig=t_orig)
+        s = o["sig"]
+        send(f"♻️ البوت تذكّر صفقته المفتوحة: {'شراء' if s['dir'] == 1 else 'بيع'} من {s['entry']:.2f}"
+             f" | الوقف {s['sl']:.2f} | الهدف {s['tp']:.2f}")
+    except Exception as e:
+        print(f"[scalp] restore error: {e}", flush=True)
+
+
 def scalp_step():
+    before = (id(scalp["sig"]), scalp["be"])
+    _scalp_step()
+    if (id(scalp["sig"]), scalp["be"]) != before:
+        scalp_persist()
+
+
+def _scalp_step():
     m15, h1 = snap.get("m15"), snap.get("h1")
     if not scalp["on"] or m15 is None:
         return
@@ -1856,6 +1917,7 @@ try:
 except Exception as e:
     print(f"[startup] {e}", flush=True)
 
+scalp_restore()
 threading.Thread(target=loop, daemon=True).start()
 threading.Thread(target=commands, daemon=True).start()
 threading.Thread(target=keepalive, daemon=True).start()
