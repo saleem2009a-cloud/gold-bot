@@ -50,7 +50,7 @@ auto = {"on": True}
 active = {"sig": None, "t0": None, "be": False}
 _cache = {}
 used = {"sym": None}
-offset = {"auto": 0.0, "manual": 0.0, "n": 0}
+offset = {"auto": 0.0, "manual": float(os.getenv("CALIB_OFFSET", "0") or 0), "n": 0}
 daily = {"d": None, "n": 0}
 ai_state = {"dir": None, "t": 0, "rejected": False}
 ai_err = {"msg": ""}
@@ -1009,6 +1009,13 @@ def run_backtest(cid, days):
         bt["running"] = False
 
 
+def dist_line(r):
+    """المسافات بالدولار، لتحطها من سعر دخولك الفعلي على منصتك"""
+    e = r["entry"]
+    return (f"📏 من سعر دخولك على منصتك: الوقف {abs(r['sl'] - e):.1f}$ | "
+            f"الهدف1 {abs(r['tp1'] - e):.1f}$ | الهدف2 {abs(r['tp'] - e):.1f}$")
+
+
 def fmt(r, header="تحليل الذهب", full=False):
     m = r["mom"]
     L = [f"🚨 {header} 🚨", f"💰 السعر: {r['price']:.2f}",
@@ -1031,18 +1038,18 @@ def fmt(r, header="تحليل الذهب", full=False):
             L += ["✅ توصية: ابتلاع مع الاتجاه (D1 + H1/H4)",
                   f"🎯 الدخول: {r['entry']:.2f}", f"🛑 الوقف: {r['sl']:.2f}",
                   f"✅ الهدف 1 (انقل الوقف للتعادل): {r['tp1']:.2f}",
-                  f"💰 الهدف 2: {r['tp']:.2f} (2:1)"]
+                  f"💰 الهدف 2: {r['tp']:.2f} (2:1)", dist_line(r)]
         elif r.get("range"):
             L += [f"🔄 توصية نطاق: {r['rng_txt']} (أضعف من توصيات الترند، حجم صغير)",
                   f"🎯 الدخول: {r['entry']:.2f}", f"🛑 الوقف: {r['sl']:.2f}",
                   f"✅ الهدف 1 نص النطاق (انقل الوقف للتعادل): {r['tp1']:.2f}",
                   f"💰 الهدف 2: {r['tp']:.2f} ({r['rr']}:1)",
-                  "⚠️ إذا انكسر النطاق بقوة، اطلع فوراً."]
+                  dist_line(r), "⚠️ إذا انكسر النطاق بقوة، اطلع فوراً."]
         elif r.get("fast"):
             L += [f"⚡ توصية سريعة: {r['fast_txt']} (أضعف من التوصية القوية، حجم أصغر)",
                   f"🎯 الدخول: {r['entry']:.2f}", f"🛑 الوقف: {r['sl']:.2f}",
                   f"✅ الهدف 1 (انقل الوقف للتعادل): {r['tp1']:.2f}",
-                  f"💰 الهدف 2: {r['tp']:.2f} (2:1)"]
+                  f"💰 الهدف 2: {r['tp']:.2f} (2:1)", dist_line(r)]
         else:
             L.append(f"⚪ لا توصية الآن ({side.split()[0]} محتمل)، الأفضل الانتظار")
             if r.get("need"):
@@ -1542,7 +1549,7 @@ def scalp_step():
             kind, "⚡ صفقة سريعة (سكالب)")
         send(f"{title} — {side}\n🎯 الدخول: {r['entry']:.2f}\n🛑 الوقف: {r['sl']:.2f}\n"
              f"✅ الهدف 1 (انقل الوقف للتعادل): {r['tp1']:.2f}\n💰 الهدف 2: {r['tp']:.2f}\n"
-             "⚠️ صفقة قصيرة (حتى 4 ساعات)، حجم صغير.")
+             f"{dist_line(r)}\n⚠️ صفقة قصيرة (حتى 4 ساعات)، حجم صغير.")
         scalp.update(sig=r, t0=now, t_orig=now, be=False, kind=kind)
 
 
