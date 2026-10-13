@@ -645,9 +645,9 @@ def analyze():
     snap["m15"], snap["h1"] = m15, h1
     r = evaluate(d1, h1, h4, m15, price, hour, mom, london_orb(m15))
     if r["dir"] is None and rng_mode["on"]:
-        rg = range_eval(h1, m15, price, lo_=False)
+        rg = range_eval(h1, m15, price, lo_=False, d1dir=r["t_d1"])
         if not rg and loose["on"]:
-            rg = range_eval(h1, m15, price, lo_=True)
+            rg = range_eval(h1, m15, price, lo_=True, d1dir=r["t_d1"])
             if rg:
                 rg["light"] = True
         if rg:
@@ -661,7 +661,7 @@ rng_mode = {"on": os.getenv("RANGE_ON", "1") == "1"}
 loose = {"on": os.getenv("LOOSE_ON", "1") == "1"}   # توصيات خفيفة 🟡 إضافية فوق الأصلية (الأصلية ما بتتغير)
 
 
-def range_eval(h1, m15, price, lo_=None):
+def range_eval(h1, m15, price, lo_=None, d1dir=None):
     """شراء قرب أرضية نطاق آخر 24 ساعة وبيع قرب سقفه، بعد ابتلاع أو رفض على M15.
     الوقف ورا طرف النطاق، الهدف 1 نص النطاق، الهدف 2 الطرف الثاني.
     lo_=True: شروط أخف (ADX<30، نطاق 1.5-10 ATR، منطقة الطرف 35%، عائد 1.2R)."""
@@ -683,10 +683,13 @@ def range_eval(h1, m15, price, lo_=None):
         d = -1
     else:
         return None
-    sl = (bot - 0.25 * a) if d == 1 else (top + 0.25 * a)
-    risk = abs(price - sl)
-    if risk < 0.5 * float(atr(m15).iloc[-2]):
+    if d1dir and d == -d1dir:                 # لا نطاق ضد اتجاه D1
         return None
+    sl = (bot - 0.25 * a) if d == 1 else (top + 0.25 * a)
+    min_sd = max(1.0 * float(atr(m15).iloc[-2]), 5.0)   # وقف مو أقرب من 1×ATR M15 ولا من 5$
+    if abs(price - sl) < min_sd:
+        sl = price - d * min_sd
+    risk = abs(price - sl)
     mid = (top + bot) / 2
     tp = (top - 0.1 * width) if d == 1 else (bot + 0.1 * width)
     if (tp - price) * d < rr_min * risk:
