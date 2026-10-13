@@ -659,7 +659,7 @@ def analyze():
 
 # ---------------- وضع تداول النطاق (لما H4 محايد) ----------------
 rng_mode = {"on": os.getenv("RANGE_ON", "1") == "1"}
-loose = {"on": os.getenv("LOOSE_ON", "1") == "1"}   # توصيات خفيفة 🟡 إضافية فوق الأصلية (الأصلية ما بتتغير)
+loose = {"on": os.getenv("LOOSE_ON", "0") == "1"}   # توصيات خفيفة 🟡 — مطفية: خسرانة بالباك تست (13-10)
 
 
 def range_eval(h1, m15, price, lo_=None, d1dir=None):
@@ -1365,7 +1365,7 @@ def scalp_eval(m15, h1, price, lo_=None, trig=None, emad=None, sdmin=2.0):
             "tp": price + t * 2 * sd, "risk": sd}
 
 
-trend_mode = {"on": os.getenv("TREND_ON", "1") == "1"}
+trend_mode = {"on": os.getenv("TREND_ON", "0") == "1"}   # مطفي: خسران بالنصّين بالباك تست (13-10)
 
 
 def trend_eval(m15, h1, price, hi_dirs):
@@ -1394,7 +1394,7 @@ def trend_eval(m15, h1, price, hi_dirs):
             "tp": price + t * 2 * sd, "risk": sd}
 
 
-brt_mode = {"on": os.getenv("BRT_ON", "0") == "1"}   # مطفي لحتى يثبت بالباك تست
+brt_mode = {"on": os.getenv("BRT_ON", "1") == "1"}   # مفعّل: ربحان بالنصّين (26 صفقة، 13-10)
 
 
 def brt_eval(m15, h1, price, hi_dirs):
@@ -1533,7 +1533,7 @@ def run_scalp_bt(cid):
                  ("pin15", "ابتلاع أو Pin Bar، EMA 1.5", days15), ("loose", "الأخف (Pin Bar، EMA 2.0)", days15),
                  ("m5", "M5 ابتلاع (اتجاه M15)", days5), ("m5p", "M5 ابتلاع أو Pin Bar", days5),
                  ("trend", "📈 مع الترند (رجوع EMA21)", days15),
-                 ("brt", "🔁 اختراق وإعادة اختبار (تجربة، مطفي)", days15),
+                 ("brt", "🔁 اختراق وإعادة اختبار", days15),
                  ("range", "🔄 النطاق الحالي", days15), ("range_l", "🔄 النطاق الأخف", days15)]
         L = [f"📊 مقارنة النسخ (بعد سبريد {SPREAD}$، جلسة لندن+نيويورك)"]
         allr = {**r15, **{k: v for k, v in r5.items() if k != "err"}}
