@@ -653,24 +653,28 @@ def analyze():
 
 # ---------------- وضع تداول النطاق (لما H4 محايد) ----------------
 rng_mode = {"on": os.getenv("RANGE_ON", "1") == "1"}
+loose = {"on": os.getenv("LOOSE_ON", "0") == "1"}   # شروط أخف للسكالب والنطاق = صفقات أكتر
 
 
-def range_eval(h1, m15, price):
+def range_eval(h1, m15, price, lo_=None):
     """شراء قرب أرضية نطاق آخر 24 ساعة وبيع قرب سقفه، بعد ابتلاع أو رفض على M15.
-    الوقف ورا طرف النطاق، الهدف 1 نص النطاق، الهدف 2 الطرف الثاني."""
+    الوقف ورا طرف النطاق، الهدف 1 نص النطاق، الهدف 2 الطرف الثاني.
+    lo_=True: شروط أخف (ADX<30، نطاق 1.5-10 ATR، منطقة الطرف 35%، عائد 1.2R)."""
+    L = loose["on"] if lo_ is None else lo_
     if len(h1) < 60 or len(m15) < 40:
         return None
     seg = h1.iloc[-25:-1]
     top, bot = float(seg["High"].max()), float(seg["Low"].min())
     a = float(atr(h1).iloc[-2])
     width = top - bot
-    if not a > 0 or width < 2 * a or width > 8 * a or float(adx(h1).iloc[-2]) >= 25:
+    wmin, wmax, adx_max, edge, rr_min = (1.5, 10, 30, 0.35, 1.2) if L else (2, 8, 25, 0.3, 1.5)
+    if not a > 0 or width < wmin * a or width > wmax * a or float(adx(h1).iloc[-2]) >= adx_max:
         return None
     e, p = engulf(m15), pinbar(m15)
     pos = (price - bot) / width
-    if pos <= 0.3 and (e == 1 or p == 1):
+    if pos <= edge and (e == 1 or p == 1):
         d = 1
-    elif pos >= 0.7 and (e == -1 or p == -1):
+    elif pos >= 1 - edge and (e == -1 or p == -1):
         d = -1
     else:
         return None
@@ -680,7 +684,7 @@ def range_eval(h1, m15, price):
         return None
     mid = (top + bot) / 2
     tp = (top - 0.1 * width) if d == 1 else (bot + 0.1 * width)
-    if (tp - price) * d < 1.5 * risk:
+    if (tp - price) * d < rr_min * risk:
         return None
     trig = ("ابتلاع" if e == d else "رفض Pin Bar") + " M15"
     return {"dir": d, "range": True, "entry": price, "sl": sl, "sl0": sl, "tp1": mid, "tp": tp,
@@ -1310,30 +1314,51 @@ def reply(chat_id, text):
 
 
 # ---------------- وضع الصفقات السريعة (سكالب) ----------------
-def scalp_eval(m15, h1, price):
-    """ابتلاع M15 مع اتجاه H1 وعند منطقة تصحيح قرب EMA21. وقف 1.2×ATR، هدف 1R ثم 2R."""
+def scalp_eval(m15, h1, price, lo_=None):
+    """ابتلاع M15 مع اتجاه H1 وعند منطقة تصحيح قرب EMA21. وقف 1.2×ATR، هدف 1R ثم 2R.
+    lo_=True: يقبل Pin Bar كمان، ومسافة أوسع عن EMA21 (2×ATR بدل 1.2)."""
+    L = loose["on"] if lo_ is None else lo_
     if len(m15) < 80 or len(h1) < 60:
         return None
     t, e = trend(h1), engulf(m15)
-    if t == 0 or e != t:
+    if t == 0 or (e != t and not (L and pinbar(m15) == t)):
         return None
     c = m15["Close"]
     a = float(atr(m15).iloc[-2])
     if not a > 0:
         return None
-    if abs(float(c.iloc[-2]) - float(ema(c, 21).iloc[-2])) > 1.2 * a:
+    if abs(float(c.iloc[-2]) - float(ema(c, 21).iloc[-2])) > (2.0 if L else 1.2) * a:
         return None
     sd = max(1.2 * a, 2.0)
     return {"dir": t, "entry": price, "sl": price - t * sd, "tp1": price + t * sd,
             "tp": price + t * 2 * sd, "risk": sd}
 
 
+def sim_r(raw, i, d, entry, sl, tp1, tp, maxbars):
+    """مثل simulate بس الهدف بيحسب R الحقيقي (للنطاق اللي هدفه مش دايماً 2R)."""
+    n, risk, be, stop = len(raw), abs(entry - sl), False, sl
+    end = min(i + maxbars, n)
+    for j in range(i, end):
+        hi, lo = float(raw["High"].iloc[j]), float(raw["Low"].iloc[j])
+        if (lo <= stop) if d == 1 else (hi >= stop):
+            return 0.0 if be else -1.0
+        if (hi >= tp) if d == 1 else (lo <= tp):
+            return (tp - entry) * d / risk
+        if not be and ((hi >= tp1) if d == 1 else (lo <= tp1)):
+            be, stop = True, entry
+    return (float(raw["Close"].iloc[end - 1]) - entry) * d / risk
+
+
 def run_scalp_bt(cid):
+    """مقارنة الشروط الحالية مع الشروط الأخف (/loose_on) للسكالب والنطاق."""
     try:
-        reply(cid, "⏳ اختبار السكالب على آخر ~60 يوم (M15). دقائق...")
+        reply(cid, "⏳ اختبار السكالب والنطاق (الشروط الحالية مقابل الأخف) على آخر ~60 يوم M15. عدة دقائق...")
         raw = get_raw("15m", "60d")
         idx = raw.index.tz_convert("UTC") if raw.index.tz is not None else raw.index.tz_localize("UTC")
-        n, res, last_i = len(raw), [], {1: -99, -1: -99}
+        n = len(raw)
+        keys = [("scalp", False), ("scalp", True), ("range", False), ("range", True)]
+        res = {k: [] for k in keys}
+        last_i = {k: {1: -99, -1: -99} for k in keys}
         for i in range(250, n - 2):
             if not (SESSION[0] <= idx[i].hour < SESSION[1]):
                 continue
@@ -1343,30 +1368,45 @@ def run_scalp_bt(cid):
                 for k in ("Open", "High", "Low", "Close"):
                     w.iloc[-1, w.columns.get_loc(k)] = o
                 h1 = w.resample("1h").agg(OHLC).dropna()
-                s = scalp_eval(w, h1, o)
-                if not s or i - last_i[s["dir"]] < 4:
-                    continue
-                last_i[s["dir"]] = i
-                R = simulate(raw, i, s["dir"], s["entry"], s["sl"], s["tp1"], s["tp"], maxbars=16)
-                res.append((R, s["risk"]))
+                h4n = None
+                for key in keys:
+                    kind, L = key
+                    if kind == "scalp":
+                        s = scalp_eval(w, h1, o, lo_=L)
+                        mb = 16
+                    else:
+                        if h4n is None:
+                            h4 = w.resample("4h").agg(OHLC).dropna()
+                            h4n = len(h4) >= 60 and trend(h4) == 0
+                        if not h4n:
+                            continue
+                        s = range_eval(h1, w, o, lo_=L)
+                        mb = 32
+                    if not s or i - last_i[key][s["dir"]] < 4:
+                        continue
+                    last_i[key][s["dir"]] = i
+                    risk = abs(s["entry"] - s["sl"])
+                    R = sim_r(raw, i, s["dir"], s["entry"], s["sl"], s["tp1"], s["tp"], mb)
+                    res[key].append(R - SPREAD / risk)
             except Exception:
                 pass
-        if not res:
-            reply(cid, "لا صفقات في الفترة.")
-            return
-        gross = [r for r, _ in res]
-        net = [r - SPREAD / k for r, k in res]
-        h = len(res) // 2
-        L = ["📊 اختبار السكالب (آخر ~60 يوم، M15)",
-             f"قبل التكلفة: {line(gross)}",
-             f"بعد سبريد {SPREAD}$: {line(net)}",
-             f"النصف الأول: {line(net[:h])}",
-             f"النصف الثاني: {line(net[h:])}",
-             f"تقريباً {len(res) / 8.5:.1f} صفقة بالأسبوع",
-             "", "فقط إذا كان المتوسط بعد السبريد موجباً في النصفين، فعّله بـ /scalp_on وجرّبه ديمو."]
+        wk = max(n / (4 * 24 * 5), 1)
+        L = ["📊 مقارنة (آخر ~60 يوم، بعد سبريد " + f"{SPREAD}$)"]
+        for kind, title in (("scalp", "⚡ السكالب"), ("range", "🔄 النطاق")):
+            L.append("")
+            L.append(title)
+            for lo_, nm_ in ((False, "الحالي"), (True, "الأخف")):
+                r = res[(kind, lo_)]
+                h = len(r) // 2
+                L.append(f"{nm_}: {line(r)} | ~{len(r) / wk:.1f}/أسبوع")
+                if r:
+                    L.append(f"   نص أول: {line(r[:h])}")
+                    L.append(f"   نص تاني: {line(r[h:])}")
+        L += ["", f"الوضع الحالي: {'الأخف ✅' if loose['on'] else 'الحالي'}",
+              "إذا الأخف متوسطه موجب بالنصين، فعّله بـ /loose_on (ورجّع بـ /loose_off)."]
         reply(cid, "\n".join(L))
     except Exception as e:
-        reply(cid, f"❌ فشل اختبار السكالب: {e}")
+        reply(cid, f"❌ فشل الاختبار: {e}")
     finally:
         bt["running"] = False
 
@@ -1547,6 +1587,13 @@ def commands():
                 elif text.startswith("/range_off"):
                     rng_mode["on"] = False
                     reply(cid, "⏸️ وضع تداول النطاق متوقف.")
+                elif text.startswith("/loose_on"):
+                    loose["on"] = True
+                    reply(cid, "🔓 الشروط الأخف مفعّلة: السكالب بيقبل Pin Bar ومسافة أوسع عن EMA21، والنطاق شروطه أخف.\n"
+                               "ℹ️ لتبقى مفعّلة بعد إعادة التشغيل حط LOOSE_ON=1 بـ Render.")
+                elif text.startswith("/loose_off"):
+                    loose["on"] = False
+                    reply(cid, "🔒 رجعنا للشروط الأصلية.")
                 elif text.startswith("/scalp_on"):
                     scalp["on"] = True
                     reply(cid, "⚡ وضع السكالب مفعّل.")
@@ -1625,6 +1672,7 @@ def commands():
                     reply(cid, f"التلقائي: {'شغال' if auto['on'] else 'متوقف'}\n"
                                f"السكالب: {'شغال ⚡' if scalp['on'] else 'متوقف'}\n"
                                f"الساعات: {'على مدار الساعة 🌍' if allday['on'] else 'لندن+نيويورك فقط'}\n"
+                               f"الشروط: {'أخف 🔓' if loose['on'] else 'أصلية 🔒'}\n"
                                f"فلتر الأخبار: {'شغال 📰' if news['on'] else 'متوقف'}"
                                f"{(' ⚠️ ' + news['err']) if news['err'] else ''}\n"
                                f"البيانات: {used['sym']}"
@@ -1632,7 +1680,7 @@ def commands():
                                f"آخر فحص: {status['msg']} (قبل {int(time.time() - status.get('t', time.time()))} ثانية)"
                                f"{' ⚠️ الفحص التلقائي واقف!' if time.time() - status.get('t', time.time()) > 600 else ''}{t}")
                 elif text.startswith("/start"):
-                    reply(cid, "أهلاً! الأوامر:\n/tawsiya تحليل كامل\n/price السعر\n/levels قمة ونص وقاع شمعة امبارح\n/ai قراءة السوق بالذكاء الاصطناعي مع الأخبار\n/backtest 180 اختبار الاستراتيجية على التاريخ\n/calib 4193.5 معايرة السعر على منصتك\n/auto_on /auto_off\n/scalp_on /scalp_off\n/range_on /range_off تداول النطاق\n/news الأخبار القوية هذا الأسبوع\n/news_on /news_off فلتر الأخبار\n/allday_on /allday_off توصيات على مدار الساعة\n/stats نتائج التوصيات\n/stats_reset تصفير السجل\n/status")
+                    reply(cid, "أهلاً! الأوامر:\n/tawsiya تحليل كامل\n/price السعر\n/levels قمة ونص وقاع شمعة امبارح\n/ai قراءة السوق بالذكاء الاصطناعي مع الأخبار\n/backtest 180 اختبار الاستراتيجية على التاريخ\n/calib 4193.5 معايرة السعر على منصتك\n/auto_on /auto_off\n/scalp_on /scalp_off\n/scalpbt مقارنة الشروط الحالية مع الأخف\n/loose_on /loose_off شروط أخف = صفقات أكتر\n/range_on /range_off تداول النطاق\n/news الأخبار القوية هذا الأسبوع\n/news_on /news_off فلتر الأخبار\n/allday_on /allday_off توصيات على مدار الساعة\n/stats نتائج التوصيات\n/stats_reset تصفير السجل\n/status")
         except Exception as e:
             status["msg"] = f"cmd error: {e}"
             print(f"[commands] error: {e}", flush=True)
