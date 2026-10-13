@@ -57,6 +57,7 @@ ai_err = {"msg": ""}
 bt = {"running": False}
 snap = {}
 scalp = {"on": os.getenv("SCALP_ON", "1") == "1", "sig": None, "t0": None, "t_orig": None, "be": False, "bar": None}
+SCALP_EMAD = float(os.getenv("SCALP_EMAD", "1.5"))   # أقصى بعد عن EMA21 (ATR) — 1.5 أحسن من 1.2 باختبار 60 يوم
 SPREAD = 0.35                            # تكلفة تقريبية بالدولار لكل صفقة (للاختبار)
 
 
@@ -1320,7 +1321,7 @@ def scalp_eval(m15, h1, price, lo_=None, trig=None, emad=None, sdmin=2.0):
     lo_=True (الشروط الأخف): ep و 2.0. بتنفع كمان لفريم 5 دقايق (m15=M5، h1=M15)."""
     L = loose["on"] if lo_ is None else lo_
     trig = trig or ("ep" if L else "e")
-    emad = emad or (2.0 if L else 1.2)
+    emad = emad or (2.0 if L else SCALP_EMAD)
     if len(m15) < 80 or len(h1) < 60:
         return None
     t, e = trend(h1), engulf(m15)
@@ -1425,8 +1426,8 @@ def run_scalp_bt(cid):
         except Exception as e:
             r5 = {"err": str(e)[:100]}
 
-        names = [("base", "الحالي (ابتلاع، EMA 1.2)", days15), ("base2", "الحالي + صفقتين بنفس الوقت", days15),
-                 ("pin", "ابتلاع أو Pin Bar، EMA 1.2", days15), ("e15", "ابتلاع، EMA 1.5", days15),
+        names = [("base", "القديم (ابتلاع، EMA 1.2)", days15), ("base2", "القديم + صفقتين بنفس الوقت", days15),
+                 ("pin", "ابتلاع أو Pin Bar، EMA 1.2", days15), ("e15", "الحالي ✔️ (ابتلاع، EMA 1.5)", days15),
                  ("pin15", "ابتلاع أو Pin Bar، EMA 1.5", days15), ("loose", "الأخف (Pin Bar، EMA 2.0)", days15),
                  ("m5", "M5 ابتلاع (اتجاه M15)", days5), ("m5p", "M5 ابتلاع أو Pin Bar", days5),
                  ("range", "🔄 النطاق الحالي", days15), ("range_l", "🔄 النطاق الأخف", days15)]
