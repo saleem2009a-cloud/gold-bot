@@ -1069,7 +1069,7 @@ def fmt(r, header="تحليل الذهب", full=False):
 
 
 # ---------------- سجل النتائج (محفوظ برسالة مثبتة على تليجرام) ----------------
-KINDS = {"strong": "قوية 🚨", "fast": "سريعة ⚡", "range": "نطاق 🔄", "scalp": "سكالب ⚡⚡", "light": "خفيفة 🟡", "trend": "ترند 📈"}
+KINDS = {"strong": "قوية 🚨", "fast": "سريعة ⚡", "range": "نطاق 🔄", "scalp": "سكالب ⚡⚡", "light": "خفيفة 🟡", "trend": "ترند 📈", "brt": "اختراق 🔁"}
 RES = {"tp": "🎯 هدف", "sl": "🛑 وقف", "be": "⚪ تعادل", "exp": "⌛ انتهت"}
 JTAG = "📒 سجل البوت (لا تحذف ولا تلغي تثبيت هالرسالة)\n"
 journal = {"loaded": False, "msg_id": None,
@@ -1382,6 +1382,38 @@ def trend_eval(m15, h1, price, hi_dirs):
             "tp": price + t * 2 * sd, "risk": sd}
 
 
+brt_mode = {"on": os.getenv("BRT_ON", "0") == "1"}   # مطفي لحتى يثبت بالباك تست
+
+
+def brt_eval(m15, h1, price, hi_dirs):
+    """اختراق وإعادة اختبار 🔁: مع اتجاه H1 (والفريم الكبير مش معاكس)،
+    السعر سكّر فوق قمة سابقة (أو تحت قاع)، رجع لمسها وسكّر شمعة باتجاه الترند.
+    الوقف ورا المستوى (أقل شي 1×ATR و3$)، هدف 1R ثم 2R."""
+    if len(m15) < 80 or len(h1) < 60:
+        return None
+    t = trend(h1)
+    if t == 0 or any(x == -t for x in hi_dirs) or not any(x == t for x in hi_dirs):
+        return None
+    hi, lo, c, o = m15["High"], m15["Low"], m15["Close"], m15["Open"]
+    a = float(atr(m15).iloc[-2])
+    if not a > 0:
+        return None
+    base = (hi if t == 1 else lo).iloc[-40:-12]
+    level = float(base.max() if t == 1 else base.min())
+    brk = [(float(x) - level) * t > 0.2 * a for x in c.iloc[-11:-2]]
+    if not any(brk):
+        return None
+    c2, o2 = float(c.iloc[-2]), float(o.iloc[-2])
+    touch = float(lo.iloc[-2]) <= level + 0.3 * a if t == 1 else float(hi.iloc[-2]) >= level - 0.3 * a
+    if not (touch and (c2 - level) * t > 0 and (c2 - o2) * t > 0):
+        return None
+    sd = max(abs(price - (level - t * 0.5 * a)), 1.0 * a, 3.0)
+    if sd > 3 * a:
+        return None
+    return {"dir": t, "entry": price, "sl": price - t * sd, "tp1": price + t * sd,
+            "tp": price + t * 2 * sd, "risk": sd}
+
+
 def sim_r(raw, i, d, entry, sl, tp1, tp, maxbars):
     """بترجع (R الحقيقي، رقم شمعة الخروج)."""
     n, risk, be, stop = len(raw), abs(entry - sl), False, sl
@@ -1443,6 +1475,7 @@ def run_scalp_bt(cid):
             h4 = w.resample("4h").agg(OHLC).dropna()
             if len(h4) >= 60:
                 sigs.append(("trend", trend_eval(w, h1, o, [trend(h4)]), 16))
+                sigs.append(("brt", brt_eval(w, h1, o, [trend(h4)]), 16))
             if len(h4) >= 60 and trend(h4) == 0:
                 for v, L in (("range", False), ("range_l", True)):
                     sigs.append((v, range_eval(h1, w, o, lo_=L), 32))
@@ -1477,6 +1510,7 @@ def run_scalp_bt(cid):
                  ("pin15", "ابتلاع أو Pin Bar، EMA 1.5", days15), ("loose", "الأخف (Pin Bar، EMA 2.0)", days15),
                  ("m5", "M5 ابتلاع (اتجاه M15)", days5), ("m5p", "M5 ابتلاع أو Pin Bar", days5),
                  ("trend", "📈 مع الترند (رجوع EMA21)", days15),
+                 ("brt", "🔁 اختراق وإعادة اختبار (تجربة، مطفي)", days15),
                  ("range", "🔄 النطاق الحالي", days15), ("range_l", "🔄 النطاق الأخف", days15)]
         L = [f"📊 مقارنة النسخ (بعد سبريد {SPREAD}$، جلسة لندن+نيويورك)"]
         allr = {**r15, **{k: v for k, v in r5.items() if k != "err"}}
@@ -1543,9 +1577,12 @@ def scalp_step():
         r, kind = scalp_eval(m15, h1, px, lo_=True), "light"
     if not r and trend_mode["on"]:
         r, kind = trend_eval(m15, h1, px, snap.get("t_hi", [])), "trend"
+    if not r and brt_mode["on"]:
+        r, kind = brt_eval(m15, h1, px, snap.get("t_hi", [])), "brt"
     if r:
         side = "شراء 🟢" if r["dir"] == 1 else "بيع 🔴"
-        title = {"light": "🟡 صفقة خفيفة (شروط أخف)", "trend": "📈 صفقة مع الترند (رجوع لـ EMA21)"}.get(
+        title = {"light": "🟡 صفقة خفيفة (شروط أخف)", "trend": "📈 صفقة مع الترند (رجوع لـ EMA21)",
+                 "brt": "🔁 صفقة اختراق وإعادة اختبار"}.get(
             kind, "⚡ صفقة سريعة (سكالب)")
         send(f"{title} — {side}\n🎯 الدخول: {r['entry']:.2f}\n🛑 الوقف: {r['sl']:.2f}\n"
              f"✅ الهدف 1 (انقل الوقف للتعادل): {r['tp1']:.2f}\n💰 الهدف 2: {r['tp']:.2f}\n"
@@ -1696,6 +1733,12 @@ def commands():
                 elif text.startswith("/trend_off"):
                     trend_mode["on"] = False
                     reply(cid, "⏸️ صفقات مع الترند متوقفة.")
+                elif text.startswith("/brt_on"):
+                    brt_mode["on"] = True
+                    reply(cid, "🔁 صفقات الاختراق وإعادة الاختبار مفعّلة.")
+                elif text.startswith("/brt_off"):
+                    brt_mode["on"] = False
+                    reply(cid, "⏸️ صفقات الاختراق وإعادة الاختبار متوقفة.")
                 elif text.startswith("/scalp_on"):
                     scalp["on"] = True
                     reply(cid, "⚡ وضع السكالب مفعّل.")
