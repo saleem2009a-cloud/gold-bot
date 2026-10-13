@@ -643,6 +643,7 @@ def analyze():
            "2h": price - float(mc.iloc[-9])}
     hour = datetime.now(timezone.utc).hour
     snap["m15"], snap["h1"] = m15, h1
+    snap["t_hi"] = [trend(d1), trend(h4)]
     r = evaluate(d1, h1, h4, m15, price, hour, mom, london_orb(m15))
     if r["dir"] is None and rng_mode["on"]:
         rg = range_eval(h1, m15, price, lo_=False, d1dir=r["t_d1"])
@@ -1061,7 +1062,7 @@ def fmt(r, header="تحليل الذهب", full=False):
 
 
 # ---------------- سجل النتائج (محفوظ برسالة مثبتة على تليجرام) ----------------
-KINDS = {"strong": "قوية 🚨", "fast": "سريعة ⚡", "range": "نطاق 🔄", "scalp": "سكالب ⚡⚡", "light": "خفيفة 🟡"}
+KINDS = {"strong": "قوية 🚨", "fast": "سريعة ⚡", "range": "نطاق 🔄", "scalp": "سكالب ⚡⚡", "light": "خفيفة 🟡", "trend": "ترند 📈"}
 RES = {"tp": "🎯 هدف", "sl": "🛑 وقف", "be": "⚪ تعادل", "exp": "⌛ انتهت"}
 JTAG = "📒 سجل البوت (لا تحذف ولا تلغي تثبيت هالرسالة)\n"
 journal = {"loaded": False, "msg_id": None,
@@ -1345,6 +1346,35 @@ def scalp_eval(m15, h1, price, lo_=None, trig=None, emad=None, sdmin=2.0):
             "tp": price + t * 2 * sd, "risk": sd}
 
 
+trend_mode = {"on": os.getenv("TREND_ON", "1") == "1"}
+
+
+def trend_eval(m15, h1, price, hi_dirs):
+    """مع الترند 📈: اتجاه H1 + (D1 أو H4) نفس الاتجاه وما في فريم كبير معاكس.
+    الدخول لما شمعة M15 ترجع تلمس EMA21 وتسكر باتجاه الترند (ما بدها ابتلاع).
+    وقف 1.2×ATR M15 (أقل شي 3$)، هدف 1R ثم 2R."""
+    if len(m15) < 80 or len(h1) < 60:
+        return None
+    t = trend(h1)
+    if t == 0 or any(x == -t for x in hi_dirs) or not any(x == t for x in hi_dirs):
+        return None
+    c, o = float(m15["Close"].iloc[-2]), float(m15["Open"].iloc[-2])
+    lo, hi = float(m15["Low"].iloc[-2]), float(m15["High"].iloc[-2])
+    e = float(ema(m15["Close"], 21).iloc[-2])
+    a = float(atr(m15).iloc[-2])
+    if not a > 0:
+        return None
+    if t == 1:
+        ok = lo <= e + 0.3 * a and c > e and c > o and c - e < a
+    else:
+        ok = hi >= e - 0.3 * a and c < e and c < o and e - c < a
+    if not ok:
+        return None
+    sd = max(1.2 * a, 3.0)
+    return {"dir": t, "entry": price, "sl": price - t * sd, "tp1": price + t * sd,
+            "tp": price + t * 2 * sd, "risk": sd}
+
+
 def sim_r(raw, i, d, entry, sl, tp1, tp, maxbars):
     """بترجع (R الحقيقي، رقم شمعة الخروج)."""
     n, risk, be, stop = len(raw), abs(entry - sl), False, sl
@@ -1404,6 +1434,8 @@ def run_scalp_bt(cid):
             h1 = w.resample("1h").agg(OHLC).dropna()
             sigs = [(v, scalp_eval(w, h1, o, trig=t, emad=e), 16) for v, t, e in variants]
             h4 = w.resample("4h").agg(OHLC).dropna()
+            if len(h4) >= 60:
+                sigs.append(("trend", trend_eval(w, h1, o, [trend(h4)]), 16))
             if len(h4) >= 60 and trend(h4) == 0:
                 for v, L in (("range", False), ("range_l", True)):
                     sigs.append((v, range_eval(h1, w, o, lo_=L), 32))
@@ -1437,6 +1469,7 @@ def run_scalp_bt(cid):
                  ("pin", "ابتلاع أو Pin Bar، EMA 1.2", days15), ("e15", "الحالي ✔️ (ابتلاع، EMA 1.5)", days15),
                  ("pin15", "ابتلاع أو Pin Bar، EMA 1.5", days15), ("loose", "الأخف (Pin Bar، EMA 2.0)", days15),
                  ("m5", "M5 ابتلاع (اتجاه M15)", days5), ("m5p", "M5 ابتلاع أو Pin Bar", days5),
+                 ("trend", "📈 مع الترند (رجوع EMA21)", days15),
                  ("range", "🔄 النطاق الحالي", days15), ("range_l", "🔄 النطاق الأخف", days15)]
         L = [f"📊 مقارنة النسخ (بعد سبريد {SPREAD}$، جلسة لندن+نيويورك)"]
         allr = {**r15, **{k: v for k, v in r5.items() if k != "err"}}
@@ -1501,9 +1534,12 @@ def scalp_step():
     r, kind = scalp_eval(m15, h1, px, lo_=False), "scalp"
     if not r and loose["on"]:
         r, kind = scalp_eval(m15, h1, px, lo_=True), "light"
+    if not r and trend_mode["on"]:
+        r, kind = trend_eval(m15, h1, px, snap.get("t_hi", [])), "trend"
     if r:
         side = "شراء 🟢" if r["dir"] == 1 else "بيع 🔴"
-        title = "🟡 صفقة خفيفة (شروط أخف)" if kind == "light" else "⚡ صفقة سريعة (سكالب)"
+        title = {"light": "🟡 صفقة خفيفة (شروط أخف)", "trend": "📈 صفقة مع الترند (رجوع لـ EMA21)"}.get(
+            kind, "⚡ صفقة سريعة (سكالب)")
         send(f"{title} — {side}\n🎯 الدخول: {r['entry']:.2f}\n🛑 الوقف: {r['sl']:.2f}\n"
              f"✅ الهدف 1 (انقل الوقف للتعادل): {r['tp1']:.2f}\n💰 الهدف 2: {r['tp']:.2f}\n"
              "⚠️ صفقة قصيرة (حتى 4 ساعات)، حجم صغير.")
@@ -1647,6 +1683,12 @@ def commands():
                 elif text.startswith("/loose_off"):
                     loose["on"] = False
                     reply(cid, "🔒 التوصيات الخفيفة متوقفة، بس الأصلية شغالة.")
+                elif text.startswith("/trend_on"):
+                    trend_mode["on"] = True
+                    reply(cid, "📈 صفقات مع الترند مفعّلة.")
+                elif text.startswith("/trend_off"):
+                    trend_mode["on"] = False
+                    reply(cid, "⏸️ صفقات مع الترند متوقفة.")
                 elif text.startswith("/scalp_on"):
                     scalp["on"] = True
                     reply(cid, "⚡ وضع السكالب مفعّل.")
