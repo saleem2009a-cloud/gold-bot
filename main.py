@@ -1314,96 +1314,135 @@ def reply(chat_id, text):
 
 
 # ---------------- وضع الصفقات السريعة (سكالب) ----------------
-def scalp_eval(m15, h1, price, lo_=None):
+def scalp_eval(m15, h1, price, lo_=None, trig=None, emad=None, sdmin=2.0):
     """ابتلاع M15 مع اتجاه H1 وعند منطقة تصحيح قرب EMA21. وقف 1.2×ATR، هدف 1R ثم 2R.
-    lo_=True: يقبل Pin Bar كمان، ومسافة أوسع عن EMA21 (2×ATR بدل 1.2)."""
+    trig: "e" ابتلاع بس، "ep" ابتلاع أو Pin Bar. emad: أقصى بعد عن EMA21 بوحدات ATR.
+    lo_=True (الشروط الأخف): ep و 2.0. بتنفع كمان لفريم 5 دقايق (m15=M5، h1=M15)."""
     L = loose["on"] if lo_ is None else lo_
+    trig = trig or ("ep" if L else "e")
+    emad = emad or (2.0 if L else 1.2)
     if len(m15) < 80 or len(h1) < 60:
         return None
     t, e = trend(h1), engulf(m15)
-    if t == 0 or (e != t and not (L and pinbar(m15) == t)):
+    if t == 0 or (e != t and not (trig == "ep" and pinbar(m15) == t)):
         return None
     c = m15["Close"]
     a = float(atr(m15).iloc[-2])
     if not a > 0:
         return None
-    if abs(float(c.iloc[-2]) - float(ema(c, 21).iloc[-2])) > (2.0 if L else 1.2) * a:
+    if abs(float(c.iloc[-2]) - float(ema(c, 21).iloc[-2])) > emad * a:
         return None
-    sd = max(1.2 * a, 2.0)
+    sd = max(1.2 * a, sdmin)
     return {"dir": t, "entry": price, "sl": price - t * sd, "tp1": price + t * sd,
             "tp": price + t * 2 * sd, "risk": sd}
 
 
 def sim_r(raw, i, d, entry, sl, tp1, tp, maxbars):
-    """مثل simulate بس الهدف بيحسب R الحقيقي (للنطاق اللي هدفه مش دايماً 2R)."""
+    """بترجع (R الحقيقي، رقم شمعة الخروج)."""
     n, risk, be, stop = len(raw), abs(entry - sl), False, sl
     end = min(i + maxbars, n)
     for j in range(i, end):
         hi, lo = float(raw["High"].iloc[j]), float(raw["Low"].iloc[j])
         if (lo <= stop) if d == 1 else (hi >= stop):
-            return 0.0 if be else -1.0
+            return (0.0 if be else -1.0), j
         if (hi >= tp) if d == 1 else (lo <= tp):
-            return (tp - entry) * d / risk
+            return (tp - entry) * d / risk, j
         if not be and ((hi >= tp1) if d == 1 else (lo <= tp1)):
             be, stop = True, entry
-    return (float(raw["Close"].iloc[end - 1]) - entry) * d / risk
+    return (float(raw["Close"].iloc[end - 1]) - entry) * d / risk, end - 1
+
+
+def _bt_pass(raw, step_fn, maxbars, slots):
+    """يمشي على الشموع بجلسة لندن+نيويورك، وما بيفتح أكتر من slots صفقات بنفس الوقت (متل البوت الحقيقي)."""
+    idx = raw.index.tz_convert("UTC") if raw.index.tz is not None else raw.index.tz_localize("UTC")
+    out, last_i, busy = {}, {}, {}
+    for i in range(250, len(raw) - 2):
+        if not (SESSION[0] <= idx[i].hour < SESSION[1]):
+            continue
+        try:
+            sigs = step_fn(raw, i)
+        except Exception:
+            continue
+        for key, s, mb in sigs:
+            if not s:
+                continue
+            li = last_i.setdefault(key, {1: -99, -1: -99})
+            if i - li[s["dir"]] < 4:
+                continue
+            for k2, sl_ in slots.get(key, [(key, 1)]):
+                b = busy.setdefault(k2, [])
+                b[:] = [x for x in b if x > i]
+                if len(b) >= sl_:
+                    continue
+                risk = abs(s["entry"] - s["sl"])
+                R, j = sim_r(raw, i, s["dir"], s["entry"], s["sl"], s["tp1"], s["tp"], mb)
+                b.append(j)
+                out.setdefault(k2, []).append(R - SPREAD / risk)
+            li[s["dir"]] = i
+    return out
 
 
 def run_scalp_bt(cid):
-    """مقارنة الشروط الحالية مع الشروط الأخف (/loose_on) للسكالب والنطاق."""
+    """مقارنة نسخ السكالب (والنطاق) على آخر ~60 يوم، بعد السبريد، صفقة وحدة بنفس الوقت."""
     try:
-        reply(cid, "⏳ اختبار السكالب والنطاق (الشروط الحالية مقابل الأخف) على آخر ~60 يوم M15. عدة دقائق...")
+        reply(cid, "⏳ اختبار نسخ السكالب (M15 + M5) والنطاق على آخر ~60 يوم. ممكن ياخد 5-10 دقائق...")
+        variants = [("base", "e", 1.2), ("pin", "ep", 1.2), ("e15", "e", 1.5), ("pin15", "ep", 1.5), ("loose", "ep", 2.0)]
+
+        def step15(raw, i):
+            w = raw.iloc[max(0, i - 1200):i + 1].copy()
+            o = float(w["Open"].iloc[-1])
+            for k in ("Open", "High", "Low", "Close"):
+                w.iloc[-1, w.columns.get_loc(k)] = o
+            h1 = w.resample("1h").agg(OHLC).dropna()
+            sigs = [(v, scalp_eval(w, h1, o, trig=t, emad=e), 16) for v, t, e in variants]
+            h4 = w.resample("4h").agg(OHLC).dropna()
+            if len(h4) >= 60 and trend(h4) == 0:
+                for v, L in (("range", False), ("range_l", True)):
+                    sigs.append((v, range_eval(h1, w, o, lo_=L), 32))
+            return sigs
+
         raw = get_raw("15m", "60d")
-        idx = raw.index.tz_convert("UTC") if raw.index.tz is not None else raw.index.tz_localize("UTC")
-        n = len(raw)
-        keys = [("scalp", False), ("scalp", True), ("range", False), ("range", True)]
-        res = {k: [] for k in keys}
-        last_i = {k: {1: -99, -1: -99} for k in keys}
-        for i in range(250, n - 2):
-            if not (SESSION[0] <= idx[i].hour < SESSION[1]):
-                continue
-            try:
-                w = raw.iloc[max(0, i - 1200):i + 1].copy()
-                o = float(w["Open"].iloc[-1])
-                for k in ("Open", "High", "Low", "Close"):
-                    w.iloc[-1, w.columns.get_loc(k)] = o
-                h1 = w.resample("1h").agg(OHLC).dropna()
-                h4n = None
-                for key in keys:
-                    kind, L = key
-                    if kind == "scalp":
-                        s = scalp_eval(w, h1, o, lo_=L)
-                        mb = 16
-                    else:
-                        if h4n is None:
-                            h4 = w.resample("4h").agg(OHLC).dropna()
-                            h4n = len(h4) >= 60 and trend(h4) == 0
-                        if not h4n:
-                            continue
-                        s = range_eval(h1, w, o, lo_=L)
-                        mb = 32
-                    if not s or i - last_i[key][s["dir"]] < 4:
-                        continue
-                    last_i[key][s["dir"]] = i
-                    risk = abs(s["entry"] - s["sl"])
-                    R = sim_r(raw, i, s["dir"], s["entry"], s["sl"], s["tp1"], s["tp"], mb)
-                    res[key].append(R - SPREAD / risk)
-            except Exception:
-                pass
-        wk = max(n / (4 * 24 * 5), 1)
-        L = ["📊 مقارنة (آخر ~60 يوم، بعد سبريد " + f"{SPREAD}$)"]
-        for kind, title in (("scalp", "⚡ السكالب"), ("range", "🔄 النطاق")):
-            L.append("")
-            L.append(title)
-            for lo_, nm_ in ((False, "الحالي"), (True, "الأخف")):
-                r = res[(kind, lo_)]
-                h = len(r) // 2
-                L.append(f"{nm_}: {line(r)} | ~{len(r) / wk:.1f}/أسبوع")
-                if r:
-                    L.append(f"   نص أول: {line(r[:h])}")
-                    L.append(f"   نص تاني: {line(r[h:])}")
-        L += ["", f"الوضع الحالي: {'الأخف ✅' if loose['on'] else 'الحالي'}",
-              "إذا الأخف متوسطه موجب بالنصين، فعّله بـ /loose_on (ورجّع بـ /loose_off)."]
+        days15 = max((raw.index[-1] - raw.index[0]).days, 1)
+        slots = {v: [(v, 1)] for v, _, _ in variants}
+        slots["base"] = [("base", 1), ("base2", 2)]       # نفس الشروط بس صفقتين بنفس الوقت
+        r15 = _bt_pass(raw, step15, 16, slots)
+
+        def step5(raw, i):
+            w = raw.iloc[max(0, i - 900):i + 1].copy()
+            o = float(w["Open"].iloc[-1])
+            for k in ("Open", "High", "Low", "Close"):
+                w.iloc[-1, w.columns.get_loc(k)] = o
+            m15 = w.resample("15min").agg(OHLC).dropna()
+            return [("m5", scalp_eval(w, m15, o, trig="e", emad=1.2, sdmin=1.5), 48),
+                    ("m5p", scalp_eval(w, m15, o, trig="ep", emad=1.2, sdmin=1.5), 48)]
+
+        r5, days5 = {}, 1
+        try:
+            raw5 = get_raw("5m", "60d")
+            days5 = max((raw5.index[-1] - raw5.index[0]).days, 1)
+            r5 = _bt_pass(raw5, step5, 48, {})
+            del raw5
+        except Exception as e:
+            r5 = {"err": str(e)[:100]}
+
+        names = [("base", "الحالي (ابتلاع، EMA 1.2)", days15), ("base2", "الحالي + صفقتين بنفس الوقت", days15),
+                 ("pin", "ابتلاع أو Pin Bar، EMA 1.2", days15), ("e15", "ابتلاع، EMA 1.5", days15),
+                 ("pin15", "ابتلاع أو Pin Bar، EMA 1.5", days15), ("loose", "الأخف (Pin Bar، EMA 2.0)", days15),
+                 ("m5", "M5 ابتلاع (اتجاه M15)", days5), ("m5p", "M5 ابتلاع أو Pin Bar", days5),
+                 ("range", "🔄 النطاق الحالي", days15), ("range_l", "🔄 النطاق الأخف", days15)]
+        L = [f"📊 مقارنة النسخ (بعد سبريد {SPREAD}$، جلسة لندن+نيويورك)"]
+        allr = {**r15, **{k: v for k, v in r5.items() if k != "err"}}
+        for k, title, dd in names:
+            r = allr.get(k, [])
+            h = len(r) // 2
+            ok = r and stats(r[:h])["avg"] > 0 and stats(r[h:])["avg"] > 0 if h else False
+            L += ["", f"{'✅' if ok else '❌'} {title}",
+                  f"{line(r)} | ~{len(r) / dd * 7:.1f}/أسبوع"]
+            if r:
+                L.append(f"   نص1 {stats(r[:h])['avg']:+.2f}R | نص2 {stats(r[h:])['avg']:+.2f}R")
+        if "err" in r5:
+            L.append(f"\n⚠️ M5 ما اشتغل: {r5['err']}")
+        L += ["", "✅ = ربحان بالنصّين. ابعت الصورة لـ Claude ليختار ويفعّل الأحسن."]
         reply(cid, "\n".join(L))
     except Exception as e:
         reply(cid, f"❌ فشل الاختبار: {e}")
