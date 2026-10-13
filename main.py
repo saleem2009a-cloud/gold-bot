@@ -645,7 +645,11 @@ def analyze():
     snap["m15"], snap["h1"] = m15, h1
     r = evaluate(d1, h1, h4, m15, price, hour, mom, london_orb(m15))
     if r["dir"] is None and rng_mode["on"]:
-        rg = range_eval(h1, m15, price)
+        rg = range_eval(h1, m15, price, lo_=False)
+        if not rg and loose["on"]:
+            rg = range_eval(h1, m15, price, lo_=True)
+            if rg:
+                rg["light"] = True
         if rg:
             r.update(rg, score=0, met=0, notes=rg["notes"], missing=[], elite=False, fast=False,
                      sweep=False, ob=False, fvg=None, levels=daily_levels(d1))
@@ -654,7 +658,7 @@ def analyze():
 
 # ---------------- وضع تداول النطاق (لما H4 محايد) ----------------
 rng_mode = {"on": os.getenv("RANGE_ON", "1") == "1"}
-loose = {"on": os.getenv("LOOSE_ON", "0") == "1"}   # شروط أخف للسكالب والنطاق = صفقات أكتر
+loose = {"on": os.getenv("LOOSE_ON", "1") == "1"}   # توصيات خفيفة 🟡 إضافية فوق الأصلية (الأصلية ما بتتغير)
 
 
 def range_eval(h1, m15, price, lo_=None):
@@ -1054,7 +1058,7 @@ def fmt(r, header="تحليل الذهب", full=False):
 
 
 # ---------------- سجل النتائج (محفوظ برسالة مثبتة على تليجرام) ----------------
-KINDS = {"strong": "قوية 🚨", "fast": "سريعة ⚡", "range": "نطاق 🔄", "scalp": "سكالب ⚡⚡"}
+KINDS = {"strong": "قوية 🚨", "fast": "سريعة ⚡", "range": "نطاق 🔄", "scalp": "سكالب ⚡⚡", "light": "خفيفة 🟡"}
 RES = {"tp": "🎯 هدف", "sl": "🛑 وقف", "be": "⚪ تعادل", "exp": "⌛ انتهت"}
 JTAG = "📒 سجل البوت (لا تحذف ولا تلغي تثبيت هالرسالة)\n"
 journal = {"loaded": False, "msg_id": None,
@@ -1460,7 +1464,7 @@ def scalp_step():
     if s:
         if now - scalp["t_orig"] > pd.Timedelta(hours=4):
             send("⌛ انتهت صلاحية صفقة السكالب (4 ساعات).")
-            journal_add("scalp", s["dir"], s["entry"], "exp", mtm(s))
+            journal_add(scalp.get("kind", "scalp"), s["dir"], s["entry"], "exp", mtm(s))
             scalp["sig"] = None
         else:
             bars = m15[m15.index > scalp["t0"]]
@@ -1468,12 +1472,12 @@ def scalp_step():
                 hi, lo, d = float(bars["High"].max()), float(bars["Low"].min()), s["dir"]
                 if (lo <= s["sl"]) if d == 1 else (hi >= s["sl"]):
                     send("⚡🛑 السكالب: ضرب الوقف." if not scalp["be"] else "⚡⚪ السكالب: خروج عند التعادل.")
-                    journal_add("scalp", d, s["entry"], "be" if scalp["be"] else "sl",
+                    journal_add(scalp.get("kind", "scalp"), d, s["entry"], "be" if scalp["be"] else "sl",
                                 0.0 if scalp["be"] else -1.0)
                     scalp["sig"] = None
                 elif (hi >= s["tp"]) if d == 1 else (lo <= s["tp"]):
                     send("⚡🎯 السكالب: تحقق الهدف 2 (+2R) ✅")
-                    journal_add("scalp", d, s["entry"], "tp", 2.0)
+                    journal_add(scalp.get("kind", "scalp"), d, s["entry"], "tp", 2.0)
                     scalp["sig"] = None
                 elif not scalp["be"] and ((hi >= s["tp1"]) if d == 1 else (lo <= s["tp1"])):
                     s["sl"] = s["entry"]
@@ -1490,13 +1494,17 @@ def scalp_step():
         return
     if news_block(now):                               # خبر قوي قريب: لا صفقات سكالب جديدة
         return
-    r = scalp_eval(m15, h1, float(m15["Close"].iloc[-1]))
+    px = float(m15["Close"].iloc[-1])
+    r, kind = scalp_eval(m15, h1, px, lo_=False), "scalp"
+    if not r and loose["on"]:
+        r, kind = scalp_eval(m15, h1, px, lo_=True), "light"
     if r:
         side = "شراء 🟢" if r["dir"] == 1 else "بيع 🔴"
-        send(f"⚡ صفقة سريعة (سكالب) — {side}\n🎯 الدخول: {r['entry']:.2f}\n🛑 الوقف: {r['sl']:.2f}\n"
+        title = "🟡 صفقة خفيفة (شروط أخف)" if kind == "light" else "⚡ صفقة سريعة (سكالب)"
+        send(f"{title} — {side}\n🎯 الدخول: {r['entry']:.2f}\n🛑 الوقف: {r['sl']:.2f}\n"
              f"✅ الهدف 1 (انقل الوقف للتعادل): {r['tp1']:.2f}\n💰 الهدف 2: {r['tp']:.2f}\n"
              "⚠️ صفقة قصيرة (حتى 4 ساعات)، حجم صغير.")
-        scalp.update(sig=r, t0=now, t_orig=now, be=False)
+        scalp.update(sig=r, t0=now, t_orig=now, be=False, kind=kind)
 
 
 def loop():
@@ -1538,10 +1546,12 @@ def loop():
                         r["ai"] = rev
                 if go:
                     send(fmt(r, "توصية جديدة" if r["elite"] else
-                             ("توصية نطاق 🔄" if r.get("range") else "توصية سريعة ⚡")))
+                             (("توصية نطاق خفيفة 🟡" if r.get("light") else "توصية نطاق 🔄") if r.get("range")
+                              else "توصية سريعة ⚡")))
                     now = pd.Timestamp.now(tz="UTC")
                     active.update(sig=r, t0=now, t0_orig=now, be=False,
-                                  kind="strong" if r["elite"] else ("range" if r.get("range") else "fast"))
+                                  kind="strong" if r["elite"] else ("light" if r.get("light") else
+                                                    ("range" if r.get("range") else "fast")))
                     last.update(dir=r["dir"], t=time.time())
         except Exception as e:
             status["msg"] = f"error: {e}"
@@ -1629,11 +1639,11 @@ def commands():
                     reply(cid, "⏸️ وضع تداول النطاق متوقف.")
                 elif text.startswith("/loose_on"):
                     loose["on"] = True
-                    reply(cid, "🔓 الشروط الأخف مفعّلة: السكالب بيقبل Pin Bar ومسافة أوسع عن EMA21، والنطاق شروطه أخف.\n"
-                               "ℹ️ لتبقى مفعّلة بعد إعادة التشغيل حط LOOSE_ON=1 بـ Render.")
+                    reply(cid, "🟡 التوصيات الخفيفة مفعّلة فوق الأصلية: لما الشروط الأصلية ما تكتمل، "
+                               "البوت بيجرب شروط أخف وبيبعتها مكتوب عليها 'خفيفة 🟡'. الأصلية ما تغيرت.")
                 elif text.startswith("/loose_off"):
                     loose["on"] = False
-                    reply(cid, "🔒 رجعنا للشروط الأصلية.")
+                    reply(cid, "🔒 التوصيات الخفيفة متوقفة، بس الأصلية شغالة.")
                 elif text.startswith("/scalp_on"):
                     scalp["on"] = True
                     reply(cid, "⚡ وضع السكالب مفعّل.")
@@ -1712,7 +1722,7 @@ def commands():
                     reply(cid, f"التلقائي: {'شغال' if auto['on'] else 'متوقف'}\n"
                                f"السكالب: {'شغال ⚡' if scalp['on'] else 'متوقف'}\n"
                                f"الساعات: {'على مدار الساعة 🌍' if allday['on'] else 'لندن+نيويورك فقط'}\n"
-                               f"الشروط: {'أخف 🔓' if loose['on'] else 'أصلية 🔒'}\n"
+                               f"الشروط: {'أصلية + خفيفة 🟡' if loose['on'] else 'أصلية بس 🔒'}\n"
                                f"فلتر الأخبار: {'شغال 📰' if news['on'] else 'متوقف'}"
                                f"{(' ⚠️ ' + news['err']) if news['err'] else ''}\n"
                                f"البيانات: {used['sym']}"
