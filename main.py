@@ -1,4 +1,4 @@
-import os, time, json, threading
+import os, re, time, json, threading
 from datetime import datetime, timezone, timedelta
 import requests
 import pandas as pd
@@ -1926,6 +1926,15 @@ def loop():
         time.sleep(CHECK_EVERY)
 
 
+def num_arg(text, default):
+    """الرقم من الأمر: يقبل /backtest 600 و /backtest_600 و /backtest600 والأرقام العربية ٦٠٠"""
+    m = re.search(r"\d+", re.sub(r"@\S+", " ", text))   # تجاهل اسم البوت إذا فيه أرقام
+    try:
+        return int(m.group()) if m else default
+    except Exception:
+        return default
+
+
 def commands():
     if not TOKEN:
         print("[commands] NO TOKEN FOUND - add TELEGRAM_TOKEN in Render Environment", flush=True)
@@ -2049,10 +2058,7 @@ def commands():
                     if bt["running"]:
                         reply(cid, "اختبار شغال حالياً، انتظر النتيجة.")
                     else:
-                        try:
-                            days = int(text.split()[1])
-                        except Exception:
-                            days = 365
+                        days = num_arg(text, 365)
                         bt["running"] = True
                         threading.Thread(target=run_optimize, args=(cid, min(max(days, 120), 700)),
                                          daemon=True).start()
@@ -2060,10 +2066,7 @@ def commands():
                     if bt["running"]:
                         reply(cid, "الاختبار شغال حالياً، انتظر النتيجة.")
                     else:
-                        try:
-                            days = int(text.split()[1])
-                        except Exception:
-                            days = 180
+                        days = num_arg(text, 180)
                         bt["running"] = True
                         threading.Thread(target=run_backtest, args=(cid, min(max(days, 30), 600)),
                                          daemon=True).start()
