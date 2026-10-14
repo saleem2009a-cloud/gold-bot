@@ -513,8 +513,8 @@ def evaluate(d1, h1, h4, m15, price, hour, mom=None,
         score += 10
         notes.append("منطقة تصحيح (فيبو 38-62% أو EMA21) (+10)")
     elif dist > 2 * a:
-        score -= 15
-        notes.append("السعر ممتد، خطر مطاردة (-15)")
+        score += 10                                  # /optimize + /validate: الاندفاع مع الترند أفاد بكل الفترات
+        notes.append("اندفاع قوي مع الاتجاه (سعر ممتد) (+10)")
     if lvl is not None:
         score += 5
         notes.append(f"قرب {'دعم' if d == 1 else 'مقاومة'} {lvl:.2f} (+5)")
@@ -592,7 +592,10 @@ def evaluate(d1, h1, h4, m15, price, hour, mom=None,
           "كسر وهمي": bool(sw), "FVG": bool(fv), "OB": bool(ob), "دورة زمنية": cyc["support"] == d,
           "منطقة 50% يومي": dc["zone"], "قرب مستوى يومي": bool(dc["near"]),
           "عكس مستوى يومي": dc["block"]}
-    elite = bool(fl["D1 يوافق"] and fl["ابتلاع H1/H4"] and not dc["block"])
+    # القاعدة القوية (ثبتت بـ /validate على سنة ما استُخدمت بالاختيار): 2 أو أكثر من 3 عناصر
+    core = ("D1 يوافق", "ابتلاع H1/H4", "سعر ممتد")
+    got = [k for k in core if fl[k]]
+    elite = bool(len(got) >= 2 and not dc["block"])
     trig = []
     if em == d:
         trig.append("ابتلاع M15")
@@ -614,8 +617,9 @@ def evaluate(d1, h1, h4, m15, price, hour, mom=None,
     fast = bool(not elite and fl["D1 يوافق"] and trig and zone and not dc["block"])
     r.update(dir=d, score=final, notes=notes, missing=missing, met=4 - len(missing), flags=fl,
              elite=elite, fast=fast, fast_txt=f"{' + '.join(trig)} عند {' / '.join(zone)}" if fast else "",
-             need=([] if fl["D1 يوافق"] else ["D1 لا يوافق الاتجاه"]) +
-                  ([] if fl["ابتلاع H1/H4"] else ["لا ابتلاع على H1/H4"]) +
+             elite_txt=" + ".join(got),
+             need=([f"يلزم 2 من 3 (D1 يوافق، ابتلاع H1/H4، اندفاع مع الاتجاه)، متوفر: {' + '.join(got) or 'ولا واحد'}"]
+                   if len(got) < 2 else []) +
                   (["السعر لاصق بمستوى امبارح المعاكس"] if dc["block"] else []),
              levels=lv, dconf=dc,
              sweep=sw, fvg=fv, ob=ob, candle=candle_txt,
@@ -1019,6 +1023,14 @@ def run_backtest(cid, days):
                 errs += 1
         L = [f"📊 اختبار تاريخي: آخر {days} يوم على H1 (سبوت)",
              "⚠️ تقريبي: بدون مؤشرات M15 (ORB وغيرها)، والوقف/الهدف بالـR (1R = مسافة الوقف).", ""]
+        Ra = [x for _, x, _ in cands]
+        Rt = [y for _, _, y in cands]
+        if Ra:
+            a_, t_ = stats(Ra), stats(Rt)
+            pfa = "∞" if a_["pf"] == float("inf") else f"{a_['pf']:.2f}"
+            L += [f"⭐ كل التوصيات القوية (2 من 3، بدون حد سكور): {a_['n']} صفقة | نجاح {a_['win']:.0f}% | "
+                  f"متوسط {a_['avg']:+.2f}R | المجموع {a_['tot']:+.1f}R | PF {pfa} | أقصى هبوط {a_['dd']:.1f}R",
+                  f"   مع الوقف المتحرك: المجموع {t_['tot']:+.1f}R | متوسط {t_['avg']:+.2f}R | أقصى هبوط {t_['dd']:.1f}R", ""]
         for th in (60, 70, 80, 90):
             R = [x for sc, x, _ in cands if sc >= th]
             if not R:
@@ -1074,7 +1086,7 @@ def fmt(r, header="تحليل الذهب", full=False):
         if lv:
             L.append(f"📊 امبارح: قمة {lv['high']:.2f} | 50% {lv['mid']:.2f} | قاع {lv['low']:.2f}")
         if r["elite"]:
-            L += ["✅ توصية: ابتلاع مع الاتجاه (D1 + H1/H4)",
+            L += [f"✅ توصية قوية: {r.get('elite_txt', '')}",
                   f"🎯 الدخول: {r['entry']:.2f}", f"🛑 الوقف: {r['sl']:.2f}",
                   f"✅ الهدف 1 (انقل الوقف للتعادل): {r['tp1']:.2f}",
                   f"💰 الهدف 2: {r['tp']:.2f} (2:1)", dist_line(r)]
