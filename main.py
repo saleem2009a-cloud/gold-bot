@@ -59,6 +59,10 @@ snap = {}
 scalp = {"on": os.getenv("SCALP_ON", "1") == "1", "sig": None, "t0": None, "t_orig": None, "be": False, "bar": None}
 SCALP_EMAD = float(os.getenv("SCALP_EMAD", "1.5"))   # أقصى بعد عن EMA21 (ATR) — 1.5 أحسن من 1.2 باختبار 60 يوم
 SPREAD = 0.35                            # تكلفة تقريبية بالدولار لكل صفقة (للاختبار)
+# وقف متحرك بعد الهدف 1: الوقف بيلحق أفضل سعر وصلته الصفقة على بعد TRAIL_K × R
+trail = {"on": os.getenv("TRAIL_ON", "1") == "1"}
+TRAIL_K = float(os.getenv("TRAIL_K", "1.0"))
+TRAIL_STEP = 0.25                        # ما نبعت تحريك وقف إلا إذا تقدم ربع R على الأقل (بلا إزعاج)
 
 
 # ---------------- بيانات ----------------
@@ -932,18 +936,35 @@ def ai_commentary(r):
 
 
 # ---------------- اختبار تاريخي ----------------
-def simulate(raw, i, d, entry, sl, tp1, tp, maxbars=24):
+def trail_level(d, entry, risk, best):
+    """مستوى الوقف المتحرك: أفضل سعر ناقص TRAIL_K×R، وما بينزل عن الدخول"""
+    lvl = best - d * TRAIL_K * risk
+    return max(lvl, entry) if d == 1 else min(lvl, entry)
+
+
+def sim_trade(raw, i, d, entry, sl, tp1, tp, maxbars, tr=False):
+    """بترجع (R، رقم شمعة الخروج). tr=True: وقف متحرك بعد الهدف 1 بدل وقف التعادل الثابت.
+    جوا الشمعة الواحدة منفحص الوقف أولاً (الأسوأ)، والوقف الجديد بيشتغل من الشمعة اللي بعدها."""
     n, risk, be, stop = len(raw), abs(entry - sl), False, sl
+    best = entry
     end = min(i + maxbars, n)
     for j in range(i, end):
         hi, lo = float(raw["High"].iloc[j]), float(raw["Low"].iloc[j])
         if (lo <= stop) if d == 1 else (hi >= stop):
-            return 0.0 if be else -1.0
+            return ((stop - entry) * d / risk if be else -1.0), j
         if (hi >= tp) if d == 1 else (lo <= tp):
-            return 2.0
+            return (tp - entry) * d / risk, j
         if not be and ((hi >= tp1) if d == 1 else (lo <= tp1)):
             be, stop = True, entry
-    return (float(raw["Close"].iloc[end - 1]) - entry) * d / risk
+        if be and tr:
+            best = max(best, hi) if d == 1 else min(best, lo)
+            nl = trail_level(d, entry, risk, best)
+            stop = max(stop, nl) if d == 1 else min(stop, nl)
+    return (float(raw["Close"].iloc[end - 1]) - entry) * d / risk, end - 1
+
+
+def simulate(raw, i, d, entry, sl, tp1, tp, maxbars=24, tr=False):
+    return sim_trade(raw, i, d, entry, sl, tp1, tp, maxbars, tr)[0]
 
 
 def stats(R):
@@ -986,13 +1007,14 @@ def run_backtest(cid, days):
                 if i - last_i[d] < 6:
                     continue
                 last_i[d] = i
-                cands.append((r["score"], simulate(raw, i, d, r["entry"], r["sl"], r["tp1"], r["tp"])))
+                cands.append((r["score"], simulate(raw, i, d, r["entry"], r["sl"], r["tp1"], r["tp"]),
+                              simulate(raw, i, d, r["entry"], r["sl"], r["tp1"], r["tp"], tr=True)))
             except Exception:
                 errs += 1
         L = [f"📊 اختبار تاريخي: آخر {days} يوم على H1 (سبوت)",
              "⚠️ تقريبي: بدون مؤشرات M15 (ORB وغيرها)، والوقف/الهدف بالـR (1R = مسافة الوقف).", ""]
         for th in (60, 70, 80, 90):
-            R = [x for sc, x in cands if sc >= th]
+            R = [x for sc, x, _ in cands if sc >= th]
             if not R:
                 L.append(f"سكور ≥{th}: لا صفقات")
                 continue
@@ -1000,6 +1022,17 @@ def run_backtest(cid, days):
             pf = "∞" if st["pf"] == float("inf") else f"{st['pf']:.2f}"
             L.append(f"سكور ≥{th}: {st['n']} صفقة | نجاح {st['win']:.0f}% | متوسط {st['avg']:+.2f}R | "
                      f"المجموع {st['tot']:+.1f}R | PF {pf} | أقصى هبوط {st['dd']:.1f}R")
+        R0 = [x for sc, x, _ in cands if sc >= MIN_SCORE]
+        R1 = [y for sc, _, y in cands if sc >= MIN_SCORE]
+        L += ["", f"🔁 مقارنة إدارة الصفقة بعد الهدف 1 (سكور ≥{MIN_SCORE}):"]
+        if R0:
+            a, b = stats(R0), stats(R1)
+            L += [f"⚪ وقف ثابت عند الدخول: المجموع {a['tot']:+.1f}R | متوسط {a['avg']:+.2f}R | أقصى هبوط {a['dd']:.1f}R",
+                  f"📈 وقف متحرك ({TRAIL_K:g}R): المجموع {b['tot']:+.1f}R | متوسط {b['avg']:+.2f}R | أقصى هبوط {b['dd']:.1f}R",
+                  f"الأفضل بهالفترة: {'📈 المتحرك' if b['tot'] > a['tot'] else '⚪ الثابت'}"
+                  f" | المفعّل حالياً: {'📈 المتحرك' if trail['on'] else '⚪ الثابت'} (/trail_on /trail_off)"]
+        else:
+            L.append("لا صفقات كافية للمقارنة.")
         L += ["", "كيف تقرأها: الاستراتيجية تستحق الثقة فقط إذا كان المتوسط موجباً وPF أكبر من 1.3 "
                   "وعدد الصفقات 30 أو أكثر. أقل من ذلك = عينة صغيرة لا يعتمد عليها."]
         reply(cid, "\n".join(L))
@@ -1070,10 +1103,21 @@ def fmt(r, header="تحليل الذهب", full=False):
 
 # ---------------- سجل النتائج (محفوظ برسالة مثبتة على تليجرام) ----------------
 KINDS = {"strong": "قوية 🚨", "fast": "سريعة ⚡", "range": "نطاق 🔄", "scalp": "سكالب ⚡⚡", "light": "خفيفة 🟡", "trend": "ترند 📈", "brt": "اختراق 🔁"}
-RES = {"tp": "🎯 هدف", "sl": "🛑 وقف", "be": "⚪ تعادل", "exp": "⌛ انتهت"}
+RES = {"tp": "🎯 هدف", "tr": "📈 وقف متحرك بربح", "sl": "🛑 وقف", "be": "⚪ تعادل", "exp": "⌛ انتهت"}
 JTAG = "📒 سجل البوت (لا تحذف ولا تلغي تثبيت هالرسالة)\n"
+
+
+def zk():
+    return {"tp": 0, "tr": 0, "sl": 0, "be": 0, "exp": 0, "R": 0.0}
+
+
+def kn(x):
+    """عدد صفقات نوع واحد"""
+    return sum(x.get(r, 0) for r in RES)
+
+
 journal = {"loaded": False, "msg_id": None,
-           "db": {"k": {k: {"tp": 0, "sl": 0, "be": 0, "exp": 0, "R": 0.0} for k in KINDS}, "last": []}}
+           "db": {"k": {k: zk() for k in KINDS}, "last": []}}
 
 
 def tg(method, **data):
@@ -1095,7 +1139,9 @@ def journal_load():
         try:
             db = json.loads(txt[txt.index("{"):])
             for k in KINDS:
-                db["k"].setdefault(k, {"tp": 0, "sl": 0, "be": 0, "exp": 0, "R": 0.0})
+                db["k"].setdefault(k, zk())
+                for r_ in RES:
+                    db["k"][k].setdefault(r_, 0)
             journal["db"], journal["msg_id"] = db, pm.get("message_id")
             print("[journal] loaded from pinned message", flush=True)
         except Exception as e:
@@ -1156,12 +1202,12 @@ def stats_text():
     L = ["📒 نتائج التوصيات (من وقت ما بلّش السجل)", ""]
     for k, name in KINDS.items():
         x = db["k"][k]
-        n = x["tp"] + x["sl"] + x["be"] + x["exp"]
+        n = kn(x)
         if not n:
             L.append(f"{name}: لا صفقات بعد")
             continue
-        L.append(f"{name}: {n} صفقة | 🎯{x['tp']} 🛑{x['sl']} ⚪{x['be']} ⌛{x['exp']}")
-        L.append(f"   نسبة النجاح {100 * x['tp'] / n:.0f}% | المجموع {x['R']:+.1f}R | المتوسط {x['R'] / n:+.2f}R")
+        L.append(f"{name}: {n} صفقة | 🎯{x['tp']} 📈{x.get('tr', 0)} 🛑{x['sl']} ⚪{x['be']} ⌛{x['exp']}")
+        L.append(f"   نسبة النجاح {100 * (x['tp'] + x.get('tr', 0)) / n:.0f}% | المجموع {x['R']:+.1f}R | المتوسط {x['R'] / n:+.2f}R")
     if db["last"]:
         L += ["", "آخر الصفقات:"]
         for kind, d, e, res, rm, t in db["last"][-10:][::-1]:
@@ -1169,6 +1215,108 @@ def stats_text():
     L += ["", "📏 R يعني مسافة الوقف (‎-1R = خسارة وقف كاملة)",
           "✅ العلامة الجيدة: متوسط موجب بعد ثلاثين صفقة أو أكثر"]
     return "\n".join(L)
+
+
+# ---------------- التقرير الأسبوعي ----------------
+WEEK_HOUR = int(os.getenv("WEEK_HOUR", "20"))   # الأحد الساعة 20:00 بتوقيت ألمانيا (قبل افتتاح السوق)
+
+
+def week_snap():
+    return {k: dict(v) for k, v in journal["db"]["k"].items()}
+
+
+def week_base():
+    db = journal["db"]
+    if not db.get("wk"):
+        db["wk"] = {"since": local_now().strftime("%Y-%m-%d"), "k": week_snap()}
+        journal_save()
+    return db["wk"]
+
+
+def week_text(header="📅 ملخص الأسبوع لحد هلأ"):
+    journal_load()
+    db, wk = journal["db"], week_base()
+    rows, tot = [], zk()
+    for k, name in KINDS.items():
+        cur, b = db["k"][k], wk["k"].get(k) or zk()
+        x = {r: cur.get(r, 0) - b.get(r, 0) for r in RES}
+        x["R"] = round(cur["R"] - b.get("R", 0.0), 2)
+        if min(x[r] for r in RES) < 0:              # السجل انصفّر بنص الأسبوع
+            x = {**{r: cur.get(r, 0) for r in RES}, "R": cur["R"]}
+        n = kn(x)
+        if not n:
+            continue
+        for r in list(RES) + ["R"]:
+            tot[r] += x[r]
+        rows.append((x["R"], f"{name}: {n} صفقة | 🎯{x['tp']} 📈{x['tr']} 🛑{x['sl']} ⚪{x['be']} ⌛{x['exp']} | {x['R']:+.1f}R"))
+    L = [header, f"من {wk['since']} لليوم", ""]
+    n = kn(tot)
+    if not n:
+        L.append("ما في صفقات مسكّرة هالأسبوع.")
+        return "\n".join(L)
+    L += [t for _, t in rows]
+    wins = tot["tp"] + tot["tr"]
+    L += ["", f"📊 المجموع: {n} صفقة | ربح {wins} | خسارة {tot['sl']} | تعادل {tot['be']} | انتهت {tot['exp']}",
+          f"💰 صافي الأسبوع: {tot['R']:+.1f}R (متوسط {tot['R'] / n:+.2f}R للصفقة)"]
+    if len(rows) > 1:
+        best, worst = max(rows)[1].split(":")[0], min(rows)[1].split(":")[0]
+        L.append(f"🏆 الأحسن: {best} | 👎 الأضعف: {worst}")
+    L += ["", "✅ أسبوع رابح" if tot["R"] > 0 else ("⚪ أسبوع متعادل" if tot["R"] == 0 else "🔻 أسبوع خاسر"),
+          "📏 R = مسافة الوقف. أسبوع واحد عينة صغيرة، الحكم الحقيقي بعد 30 صفقة أو أكثر (/stats)."]
+    return "\n".join(L)
+
+
+def weekly_check():
+    """كل أحد بعد WEEK_HOUR: بيبعت تقرير الأسبوع وبيبلّش أسبوع جديد"""
+    now = local_now()
+    if now.weekday() != 6 or now.hour < WEEK_HOUR or not TOKEN or not CHAT:
+        return
+    journal_load()
+    key = now.strftime("%Y-%m-%d")
+    if journal["db"].get("wk_sent") == key:
+        return
+    send(week_text("📅 التقرير الأسبوعي"))
+    journal["db"]["wk"] = {"since": key, "k": week_snap()}
+    journal["db"]["wk_sent"] = key
+    journal_save()
+
+
+# ---------------- الوقف المتحرك (حي) ----------------
+def risk_of(s):
+    """مسافة الوقف الأصلية (1R)"""
+    r0 = abs(s["entry"] - s.get("sl0", s["entry"]))
+    return r0 if r0 > 1e-9 else abs(s["tp1"] - s["entry"])
+
+
+def exit_res(s, be):
+    """نتيجة الخروج لما يضرب الوقف: (نوع، R)"""
+    if not be:
+        return "sl", -1.0
+    rv = (s["sl"] - s["entry"]) * s["dir"] / max(risk_of(s), 1e-9)
+    return ("tr", round(rv, 2)) if rv >= 0.1 else ("be", 0.0)
+
+
+def exit_msg(res, rv, prefix=""):
+    return prefix + {"sl": "🛑 ضرب وقف الخسارة.",
+                     "be": "⚪ خرجت عند التعادل (الوقف المنقول).",
+                     "tr": f"📈 ضرب الوقف المتحرك وطلعت بربح {rv:+.1f}R ✅"}[res]
+
+
+def trail_live(st, s, bars, prefix=""):
+    """بعد الهدف 1: بيحرّك الوقف ورا أفضل سعر. st = active أو scalp"""
+    if not trail["on"] or not st["be"] or bars.empty:
+        return
+    d, risk = s["dir"], risk_of(s)
+    ext = float(bars["High"].max()) if d == 1 else float(bars["Low"].min())
+    best = st.get("best") or s["entry"]
+    best = max(best, ext) if d == 1 else min(best, ext)
+    st["best"] = best
+    nl = trail_level(d, s["entry"], risk, best)
+    if (nl - s["sl"]) * d >= TRAIL_STEP * risk:
+        s["sl"] = round(nl, 2)
+        st["t0"] = pd.Timestamp.now(tz="UTC")
+        lock = (s["sl"] - s["entry"]) * d / risk
+        send(f"{prefix}📈 حرّك الوقف إلى {s['sl']:.2f} (ربح مضمون {lock:+.1f}R)")
 
 
 # ---------------- تتبع الصفقة ----------------
@@ -1180,7 +1328,7 @@ def track():
     if now - active["t0_orig"] > pd.Timedelta(hours=24):
         send("⌛ انتهت صلاحية التوصية (24 ساعة). تجاهلها وانتظر إعداداً جديداً.")
         journal_add(active.get("kind", "strong"), s["dir"], s["entry"], "exp", mtm(s))
-        active.update(sig=None)
+        active.update(sig=None, best=None)
         return
     m = get("15m", "1d")
     bars = m[m.index > active["t0"]]
@@ -1191,21 +1339,25 @@ def track():
     hit_tp = hi >= s["tp"] if d == 1 else lo <= s["tp"]
     reach1 = hi >= s["tp1"] if d == 1 else lo <= s["tp1"]
     if hit_sl:
-        send("🛑 ضرب وقف الخسارة." if not active["be"] else "⚪ خرجت عند التعادل (الوقف المنقول).")
-        journal_add(active.get("kind", "strong"), d, s["entry"], "be" if active["be"] else "sl",
-                    0.0 if active["be"] else -1.0)
+        res, rv = exit_res(s, active["be"])
+        send(exit_msg(res, rv))
+        journal_add(active.get("kind", "strong"), d, s["entry"], res, rv)
         last["t"] = time.time()
-        active.update(sig=None)
+        active.update(sig=None, best=None)
     elif hit_tp:
         rr_ = abs(s["tp"] - s["entry"]) / max(abs(s["entry"] - s.get("sl0", s["entry"])), 1e-9)
         send(f"🎯 تحقق الهدف النهائي! ربح {rr_:.1f}R ✅")
         journal_add(active.get("kind", "strong"), d, s["entry"], "tp", round(rr_, 2))
         last["t"] = time.time()
-        active.update(sig=None)
+        active.update(sig=None, best=None)
     elif reach1 and not active["be"]:
         s["sl"] = s["entry"]
-        active.update(be=True, t0=now)
-        send(f"🔔 وصل السعر الهدف 1 ({s['tp1']:.2f}). انقل الوقف إلى الدخول {s['entry']:.2f}.")
+        best = hi if d == 1 else lo
+        active.update(be=True, t0=now, best=best)
+        send(f"🔔 وصل السعر الهدف 1 ({s['tp1']:.2f}). انقل الوقف إلى الدخول {s['entry']:.2f}."
+             + ("\n📈 الوقف المتحرك شغال: البوت رح يقلك كل ما لازم تقدّم الوقف." if trail["on"] else ""))
+    else:
+        trail_live(active, s, bars)
 
 
 # ---------------- فلتر الأخبار الاقتصادية ----------------
@@ -1292,6 +1444,70 @@ def news_warn():
             if open_ else "")
     send(f"📰 خبر قوي بعد {mins} دقيقة ({news_local(t0):%H:%M}):\n{names}\n"
          f"⏸️ التوصيات الجديدة متوقفة من {NEWS_BEFORE} دقيقة قبل الخبر حتى {NEWS_AFTER} دقيقة بعده.{tail}")
+
+
+NEWS_REACT = int(os.getenv("NEWS_REACT", "15"))      # دقائق بعد الخبر لقراءة ردة فعل الذهب
+
+
+def news_actual(group):
+    """بيدوّر على الرقم الفعلي للخبر (Claude + بحث ويب) وبيبعته برسالة لحالها"""
+    try:
+        items = "\n".join(f"- {e['title']} ({e['ccy']}) | المتوقع {e['fc'] or '?'} | السابق {e['prev'] or '?'}"
+                          for e in group)
+        txt = call_claude(
+            f"صدرت هالأخبار الاقتصادية الساعة {group[0]['t']:%Y-%m-%d %H:%M} UTC:\n{items}\n"
+            "ابحث عن الرقم الفعلي لكل خبر. جاوب بالعربي بسطرين أو تلاتة بس: الفعلي مقابل المتوقع لكل خبر، "
+            "وهل النتيجة بتقوّي الدولار (عادةً سلبي للذهب) أو بتضعفه (عادةً إيجابي للذهب). "
+            "إذا ما لقيت الرقم الفعلي قول هيك بوضوح وما تخمّن.", 300, search=True)
+        if txt:
+            send("📰🧠 النتيجة الفعلية:\n" + txt[:900])
+    except Exception as e:
+        print(f"[news] actual error: {e}", flush=True)
+
+
+def news_after():
+    """بعد الخبر القوي بـ NEWS_REACT دقيقة: شو عمل الذهب، ومتى بترجع التوصيات"""
+    if not news["on"]:
+        return
+    now = pd.Timestamp.now(tz="UTC")
+    done = news.setdefault("after", set())
+    due = [e for e in news_load()
+           if e["t"] + pd.Timedelta(minutes=NEWS_REACT) <= now <= e["t"] + pd.Timedelta(minutes=90)
+           and (e["t"], e["title"]) not in done]
+    if not due:
+        return
+    t0 = due[0]["t"]
+    group = [e for e in due if e["t"] == t0]
+    m = snap.get("m15")
+    if m is None or m.index[-1] < t0:
+        m = get("15m", "1d")
+    pre, post = m[m.index < t0], m[m.index >= t0]
+    if pre.empty or post.empty:                      # البيانات لسا ما وصلت لوقت الخبر، منجرب بعدين
+        return
+    for e in group:
+        done.add((e["t"], e["title"]))
+    p0, p1 = float(pre["Close"].iloc[-1]), float(m["Close"].iloc[-1])
+    hi, lo = float(post["High"].max()), float(post["Low"].min())
+    a = max(float(atr(pre).iloc[-1]), 0.01)
+    mv = p1 - p0
+    k = abs(mv) / a
+    side = "صعود 🟢" if mv > 0 else "هبوط 🔴"
+    size = "ردة فعل هادية" if k < 0.5 else ("حركة واضحة" if k < 1.5 else "حركة قوية 🔥")
+    names = "\n".join(f"• {e['title']}" + (f" | المتوقع {e['fc']} السابق {e['prev']}" if e["fc"] or e["prev"] else "")
+                      for e in group)
+    L = [f"📰 بعد الخبر ({news_local(t0):%H:%M}) بـ {int((now - t0).total_seconds() // 60)} دقيقة:", names, "",
+         f"💰 الذهب: {p0:.2f} قبل الخبر ← {p1:.2f} الآن ({mv:+.1f}$) {side if k >= 0.5 else ''}",
+         f"📏 {size} ({k:.1f}× الحركة العادية لشمعة 15د) | أعلى {hi:.2f} | أدنى {lo:.2f}"]
+    if hi - p0 > a and p0 - lo > a:
+        L.append("⚠️ ضرب بالاتجاهين: السوق متذبذب، الأفضل تستنى يهدى.")
+    if active["sig"] or scalp["sig"]:
+        L.append("👀 عندك صفقة مفتوحة: راجع الوقف حسب الحركة.")
+    resume = t0 + pd.Timedelta(minutes=NEWS_AFTER)
+    if resume > now:
+        L.append(f"⏸️ التوصيات الجديدة بترجع الساعة {news_local(resume):%H:%M}.")
+    send("\n".join(L))
+    if ANTHROPIC_KEY:
+        threading.Thread(target=news_actual, args=(group,), daemon=True).start()
 
 
 def news_text():
@@ -1426,19 +1642,9 @@ def brt_eval(m15, h1, price, hi_dirs):
             "tp": price + t * 2 * sd, "risk": sd}
 
 
-def sim_r(raw, i, d, entry, sl, tp1, tp, maxbars):
-    """بترجع (R الحقيقي، رقم شمعة الخروج)."""
-    n, risk, be, stop = len(raw), abs(entry - sl), False, sl
-    end = min(i + maxbars, n)
-    for j in range(i, end):
-        hi, lo = float(raw["High"].iloc[j]), float(raw["Low"].iloc[j])
-        if (lo <= stop) if d == 1 else (hi >= stop):
-            return (0.0 if be else -1.0), j
-        if (hi >= tp) if d == 1 else (lo <= tp):
-            return (tp - entry) * d / risk, j
-        if not be and ((hi >= tp1) if d == 1 else (lo <= tp1)):
-            be, stop = True, entry
-    return (float(raw["Close"].iloc[end - 1]) - entry) * d / risk, end - 1
+def sim_r(raw, i, d, entry, sl, tp1, tp, maxbars, tr=None):
+    """بترجع (R الحقيقي، رقم شمعة الخروج). افتراضياً حسب إعداد الوقف المتحرك الحالي."""
+    return sim_trade(raw, i, d, entry, sl, tp1, tp, maxbars, trail["on"] if tr is None else tr)
 
 
 def _bt_pass(raw, step_fn, maxbars, slots):
@@ -1535,7 +1741,8 @@ def run_scalp_bt(cid):
                  ("trend", "📈 مع الترند (رجوع EMA21)", days15),
                  ("brt", "🔁 اختراق وإعادة اختبار", days15),
                  ("range", "🔄 النطاق الحالي", days15), ("range_l", "🔄 النطاق الأخف", days15)]
-        L = [f"📊 مقارنة النسخ (بعد سبريد {SPREAD}$، جلسة لندن+نيويورك)"]
+        L = [f"📊 مقارنة النسخ (بعد سبريد {SPREAD}$، جلسة لندن+نيويورك)",
+             f"بعد الهدف 1: {'📈 وقف متحرك' if trail['on'] else '⚪ وقف ثابت عند الدخول'} (حسب الإعداد الحالي)"]
         allr = {**r15, **{k: v for k, v in r5.items() if k != "err"}}
         for k, title, dd in names:
             r = allr.get(k, [])
@@ -1562,7 +1769,7 @@ def scalp_persist():
         s = scalp["sig"]
         journal["db"]["scalp_open"] = None if not s else {
             "sig": {k: (float(v) if isinstance(v, (int, float)) else v) for k, v in s.items()},
-            "kind": scalp.get("kind", "scalp"), "be": scalp["be"],
+            "kind": scalp.get("kind", "scalp"), "be": scalp["be"], "best": scalp.get("best"),
             "t0": scalp["t0"].isoformat(), "t_orig": scalp["t_orig"].isoformat()}
         journal_save()
     except Exception as e:
@@ -1578,7 +1785,8 @@ def scalp_restore():
         t_orig = pd.Timestamp(o["t_orig"])
         if pd.Timestamp.now(tz="UTC") - t_orig > pd.Timedelta(hours=4):
             return
-        scalp.update(sig=o["sig"], kind=o["kind"], be=o["be"], t0=pd.Timestamp(o["t0"]), t_orig=t_orig)
+        scalp.update(sig=o["sig"], kind=o["kind"], be=o["be"], t0=pd.Timestamp(o["t0"]), t_orig=t_orig,
+                     best=o.get("best"))
         s = o["sig"]
         send(f"♻️ البوت تذكّر صفقته المفتوحة: {'شراء' if s['dir'] == 1 else 'بيع'} من {s['entry']:.2f}"
              f" | الوقف {s['sl']:.2f} | الهدف {s['tp']:.2f}")
@@ -1587,9 +1795,10 @@ def scalp_restore():
 
 
 def scalp_step():
-    before = (id(scalp["sig"]), scalp["be"])
+    sl_ = lambda: (scalp["sig"] or {}).get("sl")
+    before = (id(scalp["sig"]), scalp["be"], sl_())
     _scalp_step()
-    if (id(scalp["sig"]), scalp["be"]) != before:
+    if (id(scalp["sig"]), scalp["be"], sl_()) != before:
         scalp_persist()
 
 
@@ -1603,24 +1812,28 @@ def _scalp_step():
         if now - scalp["t_orig"] > pd.Timedelta(hours=4):
             send("⌛ انتهت صلاحية صفقة السكالب (4 ساعات).")
             journal_add(scalp.get("kind", "scalp"), s["dir"], s["entry"], "exp", mtm(s))
-            scalp["sig"] = None
+            scalp.update(sig=None, best=None)
         else:
             bars = m15[m15.index > scalp["t0"]]
             if not bars.empty:
                 hi, lo, d = float(bars["High"].max()), float(bars["Low"].min()), s["dir"]
                 if (lo <= s["sl"]) if d == 1 else (hi >= s["sl"]):
-                    send("⚡🛑 السكالب: ضرب الوقف." if not scalp["be"] else "⚡⚪ السكالب: خروج عند التعادل.")
-                    journal_add(scalp.get("kind", "scalp"), d, s["entry"], "be" if scalp["be"] else "sl",
-                                0.0 if scalp["be"] else -1.0)
-                    scalp["sig"] = None
+                    res, rv = exit_res(s, scalp["be"])
+                    send(exit_msg(res, rv, "⚡ السكالب: "))
+                    journal_add(scalp.get("kind", "scalp"), d, s["entry"], res, rv)
+                    scalp.update(sig=None, best=None)
                 elif (hi >= s["tp"]) if d == 1 else (lo <= s["tp"]):
-                    send("⚡🎯 السكالب: تحقق الهدف 2 (+2R) ✅")
-                    journal_add(scalp.get("kind", "scalp"), d, s["entry"], "tp", 2.0)
-                    scalp["sig"] = None
+                    rv = round(abs(s["tp"] - s["entry"]) / max(risk_of(s), 1e-9), 2)
+                    send(f"⚡🎯 السكالب: تحقق الهدف 2 ({rv:+.1f}R) ✅")
+                    journal_add(scalp.get("kind", "scalp"), d, s["entry"], "tp", rv)
+                    scalp.update(sig=None, best=None)
                 elif not scalp["be"] and ((hi >= s["tp1"]) if d == 1 else (lo <= s["tp1"])):
                     s["sl"] = s["entry"]
-                    scalp.update(be=True, t0=now)
-                    send(f"⚡🔔 السكالب: وصل الهدف 1 ({s['tp1']:.2f}). انقل الوقف إلى {s['entry']:.2f}.")
+                    scalp.update(be=True, t0=now, best=hi if d == 1 else lo)
+                    send(f"⚡🔔 السكالب: وصل الهدف 1 ({s['tp1']:.2f}). انقل الوقف إلى {s['entry']:.2f}."
+                         + ("\n📈 الوقف المتحرك شغال." if trail["on"] else ""))
+                else:
+                    trail_live(scalp, s, bars, "⚡ السكالب: ")
         return
     bar = m15.index[-2]
     if bar == scalp["bar"]:
@@ -1648,7 +1861,8 @@ def _scalp_step():
         send(f"{title} — {side}\n🎯 الدخول: {r['entry']:.2f}\n🛑 الوقف: {r['sl']:.2f}\n"
              f"✅ الهدف 1 (انقل الوقف للتعادل): {r['tp1']:.2f}\n💰 الهدف 2: {r['tp']:.2f}\n"
              f"{dist_line(r)}\n⚠️ صفقة قصيرة (حتى 4 ساعات)، حجم صغير.")
-        scalp.update(sig=r, t0=now, t_orig=now, be=False, kind=kind)
+        r.setdefault("sl0", r["sl"])
+        scalp.update(sig=r, t0=now, t_orig=now, be=False, kind=kind, best=None)
 
 
 def loop():
@@ -1659,6 +1873,14 @@ def loop():
                 news_warn()
             except Exception as e:
                 print(f"[news] warn error: {e}", flush=True)
+            try:
+                news_after()
+            except Exception as e:
+                print(f"[news] after error: {e}", flush=True)
+            try:
+                weekly_check()
+            except Exception as e:
+                print(f"[week] error: {e}", flush=True)
             r = analyze()
             try:
                 scalp_step()
@@ -1693,7 +1915,7 @@ def loop():
                              (("توصية نطاق خفيفة 🟡" if r.get("light") else "توصية نطاق 🔄") if r.get("range")
                               else "توصية سريعة ⚡")))
                     now = pd.Timestamp.now(tz="UTC")
-                    active.update(sig=r, t0=now, t0_orig=now, be=False,
+                    active.update(sig=r, t0=now, t0_orig=now, be=False, best=None,
                                   kind="strong" if r["elite"] else ("light" if r.get("light") else
                                                     ("range" if r.get("range") else "fast")))
                     last.update(dir=r["dir"], t=time.time())
@@ -1767,10 +1989,21 @@ def commands():
                     else:
                         bt["running"] = True
                         threading.Thread(target=run_scalp_bt, args=(cid,), daemon=True).start()
+                elif text.startswith("/trail_on"):
+                    trail["on"] = True
+                    reply(cid, f"📈 الوقف المتحرك مفعّل: بعد الهدف 1 الوقف بيلحق السعر على بعد {TRAIL_K:g}R "
+                               "وبيحمي جزء من الربح. البوت بيبعتلك كل ما لازم تقدّم الوقف.")
+                elif text.startswith("/trail_off"):
+                    trail["on"] = False
+                    reply(cid, "⚪ الوقف المتحرك متوقف: بعد الهدف 1 الوقف بيضل عند الدخول (متل قبل).")
+                elif text.startswith("/week"):
+                    reply(cid, week_text())
                 elif text.startswith("/stats_reset"):
                     journal_load()
-                    journal["db"] = {"k": {k: {"tp": 0, "sl": 0, "be": 0, "exp": 0, "R": 0.0} for k in KINDS},
-                                     "last": []}
+                    journal["db"] = {"k": {k: zk() for k in KINDS}, "last": [],
+                                     "scalp_open": journal["db"].get("scalp_open"),
+                                     "wk_sent": journal["db"].get("wk_sent")}
+                    week_base()
                     journal_save()
                     reply(cid, "🧹 تم تصفير السجل.")
                 elif text.startswith("/stats"):
@@ -1879,6 +2112,7 @@ def commands():
                                f"السكالب: {'شغال ⚡' if scalp['on'] else 'متوقف'}\n"
                                f"الساعات: {'على مدار الساعة 🌍' if allday['on'] else 'لندن+نيويورك فقط'}\n"
                                f"الشروط: {'أصلية + خفيفة 🟡' if loose['on'] else 'أصلية بس 🔒'}\n"
+                               f"بعد الهدف 1: {'وقف متحرك 📈' if trail['on'] else 'وقف ثابت عند الدخول ⚪'}\n"
                                f"فلتر الأخبار: {'شغال 📰' if news['on'] else 'متوقف'}"
                                f"{(' ⚠️ ' + news['err']) if news['err'] else ''}\n"
                                f"البيانات: {used['sym']}"
@@ -1886,7 +2120,7 @@ def commands():
                                f"آخر فحص: {status['msg']} (قبل {int(time.time() - status.get('t', time.time()))} ثانية)"
                                f"{' ⚠️ الفحص التلقائي واقف!' if time.time() - status.get('t', time.time()) > 600 else ''}{t}")
                 elif text.startswith("/start"):
-                    reply(cid, "أهلاً! الأوامر:\n/tawsiya تحليل كامل\n/price السعر\n/levels قمة ونص وقاع شمعة امبارح\n/ai قراءة السوق بالذكاء الاصطناعي مع الأخبار\n/backtest 180 اختبار الاستراتيجية على التاريخ\n/calib 4193.5 معايرة السعر على منصتك\n/auto_on /auto_off\n/scalp_on /scalp_off\n/scalpbt مقارنة الشروط الحالية مع الأخف\n/loose_on /loose_off شروط أخف = صفقات أكتر\n/range_on /range_off تداول النطاق\n/news الأخبار القوية هذا الأسبوع\n/news_on /news_off فلتر الأخبار\n/allday_on /allday_off توصيات على مدار الساعة\n/stats نتائج التوصيات\n/stats_reset تصفير السجل\n/status")
+                    reply(cid, "أهلاً! الأوامر:\n/tawsiya تحليل كامل\n/price السعر\n/levels قمة ونص وقاع شمعة امبارح\n/ai قراءة السوق بالذكاء الاصطناعي مع الأخبار\n/backtest 180 اختبار الاستراتيجية على التاريخ\n/calib 4193.5 معايرة السعر على منصتك\n/auto_on /auto_off\n/scalp_on /scalp_off\n/scalpbt مقارنة الشروط الحالية مع الأخف\n/loose_on /loose_off شروط أخف = صفقات أكتر\n/range_on /range_off تداول النطاق\n/news الأخبار القوية هذا الأسبوع\n/news_on /news_off فلتر الأخبار (مع تقرير بعد كل خبر)\n/trail_on /trail_off وقف متحرك بعد الهدف 1\n/week ملخص الأسبوع لحد هلأ (التقرير الكامل بيوصل كل أحد 20:00)\n/allday_on /allday_off توصيات على مدار الساعة\n/stats نتائج التوصيات\n/stats_reset تصفير السجل\n/status")
         except Exception as e:
             status["msg"] = f"cmd error: {e}"
             print(f"[commands] error: {e}", flush=True)
@@ -1918,6 +2152,10 @@ except Exception as e:
     print(f"[startup] {e}", flush=True)
 
 scalp_restore()
+try:
+    week_base()                                  # بداية عدّ الأسبوع (إذا ما في وحدة محفوظة)
+except Exception as e:
+    print(f"[week] {e}", flush=True)
 threading.Thread(target=loop, daemon=True).start()
 threading.Thread(target=commands, daemon=True).start()
 threading.Thread(target=keepalive, daemon=True).start()
