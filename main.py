@@ -839,6 +839,9 @@ def run_validate(cid):
             ("قاعدة جديدة: D1 يوافق + ابتلاع H1/H4", lambda c: c["f"]["D1 يوافق"] and c["f"]["ابتلاع H1/H4"]),
             ("ابتلاع H1/H4 فقط", lambda c: c["f"]["ابتلاع H1/H4"]),
             ("D1 يوافق فقط", lambda c: c["f"]["D1 يوافق"]),
+            ("مرشّح جديد: 2+ من (D1 يوافق، ابتلاع H1/H4، سعر ممتد)",
+             lambda c: sum(1 for g in ("D1 يوافق", "ابتلاع H1/H4", "سعر ممتد") if c["f"][g]) >= 2),
+            ("مرشّح جديد: سعر ممتد + D1 يوافق", lambda c: c["f"]["سعر ممتد"] and c["f"]["D1 يوافق"]),
         ]
         L = [f"✅ تحقق على فترة جديدة ({days:.0f} يوم، {len(cands)} إشارة)", ""]
         for name, fn in rules:
@@ -847,6 +850,9 @@ def run_validate(cid):
             if R:
                 st = stats(R)
                 L.append(f"   {line(R)} | هبوط {st['dd']:.1f}R | ~{len(R) / wk:.1f} صفقة/أسبوع")
+                for dd_, lbl in ((1, "شراء"), (-1, "بيع")):
+                    Rd = take(cands, lambda c, fn=fn, dd_=dd_: c["d"] == dd_ and fn(c))
+                    L.append(f"   ↳ {lbl}: {line(Rd)}")
             else:
                 L.append("   لا صفقات")
         L += ["", "إذا القاعدة الجديدة موجبة وPF فوق 1.3 هنا كمان (فترة ما استخدمناها بأي اختيار)، فاحتمال الأفضلية حقيقي أكثر.",
