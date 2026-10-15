@@ -508,11 +508,14 @@ def evaluate(d1, h1, h4, m15, price, hour, mom=None,
 
     in_fib = fib_zone(h4, d, price)
     dist = abs(price - float(e21.iloc[-2]))
+    # "سعر ممتد" لازم يكون باتجاه الصفقة (للبيع: السعر تحت EMA21 بكتير). قبل كان abs() فكان يحسب
+    # الصعود القوي عكس الترند "اندفاع مع الاتجاه" ويطلع بيع بنص موجة صاعدة (15-10-2026).
+    ext = d * (price - float(e21.iloc[-2])) > 2 * a
     lvl = near_level(h1, d, price, a)
     if in_fib or dist <= a:
         score += 10
         notes.append("منطقة تصحيح (فيبو 38-62% أو EMA21) (+10)")
-    elif dist > 2 * a:
+    elif ext:
         score += 10                                  # /optimize + /validate: الاندفاع مع الترند أفاد بكل الفترات
         notes.append("اندفاع قوي مع الاتجاه (سعر ممتد) (+10)")
     if lvl is not None:
@@ -585,17 +588,31 @@ def evaluate(d1, h1, h4, m15, price, hour, mom=None,
         sl_dist = min(max(abs(price - (sw_ext - d * 0.3 * a)), 1.0 * a), 2.5 * a)
     elif lvl is not None:
         sl_dist = min(max(abs(price - (lvl - d * 0.4 * a)), 1.0 * a), 2.2 * a)
+    # فلتر الزخم المعاكس: إذا السعر ماشي بقوة عكس الصفقة بآخر 1-2 ساعة، ما منطلع توصية
+    # إلا إذا في تأكيد انعكاس فعلي (ابتلاع M15 باتجاهنا، أو كسر وهمي وآخر 15د صارت معنا).
+    if any(mom.values()):
+        mv = mom
+    else:                                            # الباك تست ما بيبعت زخم: منحسبه من H1
+        mv = {"15": 0.0, "1h": price - float(h1["Open"].iloc[-2]),
+              "2h": price - float(h1["Open"].iloc[-3])}
+    against2, against1 = -d * mv["2h"], -d * mv["1h"]
+    lim2, lim1 = max(MOM_LIM, 1.5 * a), max(0.6 * MOM_LIM, 1.0 * a)
+    reversal = em == d or (sw and d * mv["15"] > 0)
+    mblock = bool((against2 > lim2 or against1 > lim1) and not reversal)
+    if mblock:
+        score -= 25
+        notes.append(f"زخم قوي عكس الصفقة ({mv["2h"]:+.1f}$ بساعتين) بدون تأكيد انعكاس (-25)")
     final = max(0, min(100, score))
     fl = {"D1 يوافق": t_d1 == d, "ADX>=20": ax >= 20, "فيبو 38-62": bool(in_fib),
-          "قرب EMA21": dist <= a, "سعر ممتد": dist > 2 * a, "دعم/مقاومة": lvl is not None,
+          "قرب EMA21": dist <= a, "سعر ممتد": ext, "دعم/مقاومة": lvl is not None,
           "ابتلاع H1/H4": (e4 == d or e1 == d), "Pin Bar": (p4 == d or p1 == d),
           "كسر وهمي": bool(sw), "FVG": bool(fv), "OB": bool(ob), "دورة زمنية": cyc["support"] == d,
           "منطقة 50% يومي": dc["zone"], "قرب مستوى يومي": bool(dc["near"]),
-          "عكس مستوى يومي": dc["block"]}
+          "عكس مستوى يومي": dc["block"], "زخم معاكس": mblock}
     # القاعدة القوية (ثبتت بـ /validate على سنة ما استُخدمت بالاختيار): 2 أو أكثر من 3 عناصر
     core = ("D1 يوافق", "ابتلاع H1/H4", "سعر ممتد")
     got = [k for k in core if fl[k]]
-    elite = bool(len(got) >= 2 and not dc["block"])
+    elite = bool(len(got) >= 2 and not dc["block"] and not mblock)
     trig = []
     if em == d:
         trig.append("ابتلاع M15")
@@ -614,13 +631,14 @@ def evaluate(d1, h1, h4, m15, price, hour, mom=None,
         zone.append("EMA21")
     if in_fib:
         zone.append("فيبو")
-    fast = bool(not elite and fl["D1 يوافق"] and trig and zone and not dc["block"])
+    fast = bool(not elite and fl["D1 يوافق"] and trig and zone and not dc["block"] and not mblock)
     r.update(dir=d, score=final, notes=notes, missing=missing, met=4 - len(missing), flags=fl,
              elite=elite, fast=fast, fast_txt=f"{' + '.join(trig)} عند {' / '.join(zone)}" if fast else "",
              elite_txt=" + ".join(got),
              need=([f"يلزم 2 من 3 (D1 يوافق، ابتلاع H1/H4، اندفاع مع الاتجاه)، متوفر: {' + '.join(got) or 'ولا واحد'}"]
                    if len(got) < 2 else []) +
-                  (["السعر لاصق بمستوى امبارح المعاكس"] if dc["block"] else []),
+                  (["السعر لاصق بمستوى امبارح المعاكس"] if dc["block"] else []) +
+                  (["زخم قوي عكس الصفقة، ناطرين تأكيد انعكاس"] if mblock else []),
              levels=lv, dconf=dc,
              sweep=sw, fvg=fv, ob=ob, candle=candle_txt,
              entry=price, sl=price - d * sl_dist, sl0=price - d * sl_dist,
@@ -666,6 +684,7 @@ def analyze():
 
 
 # ---------------- وضع تداول النطاق (لما H4 محايد) ----------------
+MOM_LIM = float(os.getenv("MOM_LIM", "20"))     # $: أقصى حركة معاكسة بساعتين قبل منع التوصية
 rng_mode = {"on": os.getenv("RANGE_ON", "1") == "1"}
 loose = {"on": os.getenv("LOOSE_ON", "0") == "1"}   # توصيات خفيفة 🟡 — مطفية: خسرانة بالباك تست (13-10)
 
@@ -779,7 +798,7 @@ def run_optimize(cid, days):
                     dlt = sum(a) / len(a) - sum(b) / len(b)
                     row.append(f"{dlt:+.2f}")
                     ok = ok and dlt > 0
-            neg = name in ("سعر ممتد", "عكس مستوى يومي")
+            neg = name in ("سعر ممتد", "عكس مستوى يومي", "زخم معاكس")
             tag = "✅" if ok else ("⚠️" if neg else "▫️")
             if ok and not neg:
                 good.append(name)
