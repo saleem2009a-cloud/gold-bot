@@ -597,7 +597,12 @@ def evaluate(d1, h1, h4, m15, price, hour, mom=None,
               "2h": price - float(h1["Open"].iloc[-3])}
     against2, against1 = -d * mv["2h"], -d * mv["1h"]
     lim2, lim1 = max(MOM_LIM, 1.5 * a), max(0.6 * MOM_LIM, 1.0 * a)
-    reversal = em == d or (sw and d * mv["15"] > 0)
+    # تأكيد الانعكاس لازم يكون شمعة مسكّرة، مش حركة لحظية: آخر شمعة M15 مسكّرة باتجاهنا
+    # بجسم معقول (≥30% من ATR M15) + الساعة الأخيرة صارت معنا + كسر وهمي. أو ابتلاع M15.
+    cf = m15 if m15 is not None else h1
+    cb = d * (float(cf["Close"].iloc[-2]) - float(cf["Open"].iloc[-2]))
+    closed_ok = cb >= 0.3 * (am if m15 is not None else a)
+    reversal = em == d or (sw and closed_ok and d * mv["1h"] > 0)
     mblock = bool((against2 > lim2 or against1 > lim1) and not reversal)
     if mblock:
         score -= 25
