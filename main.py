@@ -699,7 +699,7 @@ def analyze():
 MOM_LIM = float(os.getenv("MOM_LIM", "20"))     # $: أقصى حركة معاكسة بساعتين قبل منع التوصية
 rng_mode = {"on": os.getenv("RANGE_ON", "1") == "1"}
 loose = {"on": os.getenv("LOOSE_ON", "0") == "1"}   # توصيات خفيفة 🟡 — مطفية: خسرانة بالباك تست (13-10)
-fast_mode = {"on": os.getenv("FAST_ON", "1") == "1"}  # التوصيات السريعة ⚡ (/fast_on /fast_off)
+fast_mode = {"on": os.getenv("FAST_ON", "0") == "1"}  # السريعة ⚡ مطفية: خسرانة بباك تست 360 يوم (قديمة PF 0.90، جديدة PF 0.85) 18-10
 
 
 def range_eval(h1, m15, price, lo_=None, d1dir=None):
