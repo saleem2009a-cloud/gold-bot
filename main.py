@@ -502,7 +502,8 @@ def evaluate(d1, h1, h4, m15, price, hour, mom=None,
         notes.append(f"سوق عرضي ADX={ax:.0f} (-15)")
 
     e21, e50 = ema(c, 21), ema(c, 50)
-    if (e21.iloc[-2] > e50.iloc[-2]) == (d == 1):
+    ema_ok = bool((e21.iloc[-2] > e50.iloc[-2]) == (d == 1))
+    if ema_ok:
         score += 5
         notes.append("ترتيب المتوسطات H1 (+5)")
 
@@ -636,9 +637,13 @@ def evaluate(d1, h1, h4, m15, price, hour, mom=None,
         zone.append("EMA21")
     if in_fib:
         zone.append("فيبو")
-    fast = bool(not elite and fl["D1 يوافق"] and trig and zone and not dc["block"] and not mblock)
+    # السريعة القديمة: D1 + أي إشارة + أي منطقة → خسرت 3 من 3 بأسبوع 14-18/10/2026.
+    # الجديدة: كمان لازم سوق فيه اتجاه (ADX≥20) + متوسطات H1 مرتبة معنا + تجمّع 3 عناصر على الأقل
+    # (يعني إشارتين عند منطقة، أو إشارة عند منطقتين) بدل عنصر واحد من كل نوع.
+    fast_old = bool(not elite and fl["D1 يوافق"] and trig and zone and not dc["block"] and not mblock)
+    fast = bool(fast_old and ax >= 20 and ema_ok and len(trig) + len(zone) >= 3)
     r.update(dir=d, score=final, notes=notes, missing=missing, met=4 - len(missing), flags=fl,
-             elite=elite, fast=fast, fast_txt=f"{' + '.join(trig)} عند {' / '.join(zone)}" if fast else "",
+             elite=elite, fast=fast, fast_old=fast_old, fast_txt=f"{' + '.join(trig)} عند {' / '.join(zone)}" if fast else "",
              elite_txt=" + ".join(got),
              need=([f"يلزم 2 من 3 (D1 يوافق، ابتلاع H1/H4، اندفاع مع الاتجاه)، متوفر: {' + '.join(got) or 'ولا واحد'}"]
                    if len(got) < 2 else []) +
@@ -676,6 +681,8 @@ def analyze():
     snap["m15"], snap["h1"] = m15, h1
     snap["t_hi"] = [trend(d1), trend(h4)]
     r = evaluate(d1, h1, h4, m15, price, hour, mom, london_orb(m15))
+    if not fast_mode["on"]:
+        r["fast"] = False
     if r["dir"] is None and rng_mode["on"]:
         rg = range_eval(h1, m15, price, lo_=False, d1dir=r["t_d1"])
         if not rg and loose["on"]:
@@ -692,6 +699,7 @@ def analyze():
 MOM_LIM = float(os.getenv("MOM_LIM", "20"))     # $: أقصى حركة معاكسة بساعتين قبل منع التوصية
 rng_mode = {"on": os.getenv("RANGE_ON", "1") == "1"}
 loose = {"on": os.getenv("LOOSE_ON", "0") == "1"}   # توصيات خفيفة 🟡 — مطفية: خسرانة بالباك تست (13-10)
+fast_mode = {"on": os.getenv("FAST_ON", "1") == "1"}  # التوصيات السريعة ⚡ (/fast_on /fast_off)
 
 
 def range_eval(h1, m15, price, lo_=None, d1dir=None):
@@ -1022,6 +1030,8 @@ def run_backtest(cid, days):
         n = len(raw)
         start = max(300, n - int(days * 23))
         cands, last_i, errs = [], {1: -99, -1: -99}, 0
+        fq = {"old": [], "new": []}                      # السريعة ⚡: الشروط القديمة مقابل الجديدة
+        fl_i = {"old": {1: -99, -1: -99}, "new": {1: -99, -1: -99}}
         for i in range(start, n - 2):
             if not (SESSION[0] <= idx[i].hour < SESSION[1]):
                 continue
@@ -1035,9 +1045,16 @@ def run_backtest(cid, days):
                 if len(d1) < 60 or len(h4) < 60:
                     continue
                 r = evaluate(d1, w, h4, None, o, idx[i].hour, today=idx[i].date())
-                if not r["dir"] or not r["elite"]:
+                if not r["dir"]:
                     continue
                 d = r["dir"]
+                for key, ok in (("old", r.get("fast_old")), ("new", r.get("fast"))):
+                    if ok and i - fl_i[key][d] >= 6:
+                        fl_i[key][d] = i
+                        fq[key].append(simulate(raw, i, d, r["entry"], r["sl"], r["tp1"], r["tp"],
+                                                tr=trail["on"]))
+                if not r["elite"]:
+                    continue
                 if i - last_i[d] < 6:
                     continue
                 last_i[d] = i
@@ -1075,6 +1092,15 @@ def run_backtest(cid, days):
                   f" | المفعّل حالياً: {'📈 المتحرك' if trail['on'] else '⚪ الثابت'} (/trail_on /trail_off)"]
         else:
             L.append("لا صفقات كافية للمقارنة.")
+        L += ["", "⚡ التوصيات السريعة (بدون ابتلاع M15 لأنه ما في بيانات M15 تاريخية):"]
+        for key, lbl in (("old", "الشروط القديمة"), ("new", "الشروط الجديدة (المفعّلة)")):
+            if fq[key]:
+                st = stats(fq[key])
+                pf = "∞" if st["pf"] == float("inf") else f"{st['pf']:.2f}"
+                L.append(f"{lbl}: {st['n']} صفقة | نجاح {st['win']:.0f}% | متوسط {st['avg']:+.2f}R | "
+                         f"المجموع {st['tot']:+.1f}R | PF {pf}")
+            else:
+                L.append(f"{lbl}: لا صفقات")
         L += ["", "كيف تقرأها: الاستراتيجية تستحق الثقة فقط إذا كان المتوسط موجباً وPF أكبر من 1.3 "
                   "وعدد الصفقات 30 أو أكثر. أقل من ذلك = عينة صغيرة لا يعتمد عليها."]
         reply(cid, "\n".join(L))
@@ -2084,6 +2110,13 @@ def commands():
                 elif text.startswith("/brt_off"):
                     brt_mode["on"] = False
                     reply(cid, "⏸️ صفقات الاختراق وإعادة الاختبار متوقفة.")
+                elif text.startswith("/fast_on"):
+                    fast_mode["on"] = True
+                    reply(cid, "⚡ التوصيات السريعة مفعّلة (بالشروط الجديدة الأشد: ADX≥20 + متوسطات H1 "
+                               "معنا + 3 عناصر تأكيد على الأقل).")
+                elif text.startswith("/fast_off"):
+                    fast_mode["on"] = False
+                    reply(cid, "⏸️ التوصيات السريعة ⚡ متوقفة. القوية والسكالب وباقي الأنواع شغالة.")
                 elif text.startswith("/scalp_on"):
                     scalp["on"] = True
                     reply(cid, "⚡ وضع السكالب مفعّل.")
@@ -2155,6 +2188,7 @@ def commands():
                          f" | SL {s['sl']:.2f} | TP {s['tp']:.2f}") if s else "\nلا صفقة نشطة"
                     reply(cid, f"التلقائي: {'شغال' if auto['on'] else 'متوقف'}\n"
                                f"السكالب: {'شغال ⚡' if scalp['on'] else 'متوقف'}\n"
+                               f"السريعة: {'شغالة ⚡ (شروط أشد)' if fast_mode['on'] else 'متوقفة'}\n"
                                f"الساعات: {'على مدار الساعة 🌍' if allday['on'] else 'لندن+نيويورك فقط'}\n"
                                f"الشروط: {'أصلية + خفيفة 🟡' if loose['on'] else 'أصلية بس 🔒'}\n"
                                f"بعد الهدف 1: {'وقف متحرك 📈' if trail['on'] else 'وقف ثابت عند الدخول ⚪'}\n"
@@ -2165,7 +2199,7 @@ def commands():
                                f"آخر فحص: {status['msg']} (قبل {int(time.time() - status.get('t', time.time()))} ثانية)"
                                f"{' ⚠️ الفحص التلقائي واقف!' if time.time() - status.get('t', time.time()) > 600 else ''}{t}")
                 elif text.startswith("/start"):
-                    reply(cid, "أهلاً! الأوامر:\n/tawsiya تحليل كامل\n/price السعر\n/levels قمة ونص وقاع شمعة امبارح\n/ai قراءة السوق بالذكاء الاصطناعي مع الأخبار\n/backtest 180 اختبار الاستراتيجية على التاريخ\n/calib 4193.5 معايرة السعر على منصتك\n/auto_on /auto_off\n/scalp_on /scalp_off\n/scalpbt مقارنة الشروط الحالية مع الأخف\n/loose_on /loose_off شروط أخف = صفقات أكتر\n/range_on /range_off تداول النطاق\n/news الأخبار القوية هذا الأسبوع\n/news_on /news_off فلتر الأخبار (مع تقرير بعد كل خبر)\n/trail_on /trail_off وقف متحرك بعد الهدف 1\n/week ملخص الأسبوع لحد هلأ (التقرير الكامل بيوصل كل أحد 20:00)\n/allday_on /allday_off توصيات على مدار الساعة\n/stats نتائج التوصيات\n/stats_reset تصفير السجل\n/status")
+                    reply(cid, "أهلاً! الأوامر:\n/tawsiya تحليل كامل\n/price السعر\n/levels قمة ونص وقاع شمعة امبارح\n/ai قراءة السوق بالذكاء الاصطناعي مع الأخبار\n/backtest 180 اختبار الاستراتيجية على التاريخ\n/calib 4193.5 معايرة السعر على منصتك\n/auto_on /auto_off\n/scalp_on /scalp_off\n/fast_on /fast_off التوصيات السريعة ⚡\n/scalpbt مقارنة الشروط الحالية مع الأخف\n/loose_on /loose_off شروط أخف = صفقات أكتر\n/range_on /range_off تداول النطاق\n/news الأخبار القوية هذا الأسبوع\n/news_on /news_off فلتر الأخبار (مع تقرير بعد كل خبر)\n/trail_on /trail_off وقف متحرك بعد الهدف 1\n/week ملخص الأسبوع لحد هلأ (التقرير الكامل بيوصل كل أحد 20:00)\n/allday_on /allday_off توصيات على مدار الساعة\n/stats نتائج التوصيات\n/stats_reset تصفير السجل\n/status")
         except Exception as e:
             status["msg"] = f"cmd error: {e}"
             print(f"[commands] error: {e}", flush=True)
