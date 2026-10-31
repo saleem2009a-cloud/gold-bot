@@ -28,9 +28,19 @@ SESSION = (7, 20)                        # ساعات لندن + نيويورك 
 allday = {"on": os.getenv("ALLDAY", "1") == "1"}   # توصيات على مدار الساعة (ما عدا توقف السوق اليومي)
 
 
+def market_closed(now=None):
+    """سوق الذهب مغلق: من إغلاق الجمعة 17:00 نيويورك لحد افتتاح الأحد 18:00 نيويورك"""
+    now = now or pd.Timestamp.now(tz="UTC")
+    ny = now.tz_convert("America/New_York")
+    m, wd = ny.hour * 60 + ny.minute, ny.weekday()
+    return (wd == 5 or (wd == 4 and m >= 17 * 60) or (wd == 6 and m < 18 * 60))
+
+
 def live_ok(now=None):
     """هل مسموح نطلع توصية جديدة الآن؟"""
     now = now or pd.Timestamp.now(tz="UTC")
+    if market_closed(now):
+        return False
     if not allday["on"]:
         return SESSION[0] <= now.hour < SESSION[1]
     ny = now.tz_convert("America/New_York")
@@ -52,7 +62,7 @@ _cache = {}
 used = {"sym": None}
 offset = {"auto": 0.0, "manual": float(os.getenv("CALIB_OFFSET", "0") or 0), "n": 0}
 daily = {"d": None, "n": 0}
-ai_state = {"dir": None, "t": 0, "rejected": False}
+ai_state = {"dir": None, "t": 0, "rejected": False, "price": None}
 ai_err = {"msg": ""}
 bt = {"running": False}
 snap = {}
@@ -955,8 +965,8 @@ def ai_review(r):
               "\n\nابحث بسرعة عن أخبار الذهب اليوم وأي حدث أمريكي عالي التأثير (CPI, NFP, FOMC, خطابات الفيدرالي) "
               "خلال الساعات الست القادمة وأي حدث جيوسياسي كبير. ارفض الإشارة إذا كان هناك خبر وشيك أو سياق "
               "كلي يعاكسها بوضوح. أجب فقط بـ JSON بدون أي نص آخر:\n"
-              '{"verdict":"approve" أو "reject","confidence":0-100,"reason":"جملة عربية قصيرة"}')
-    txt = call_claude(prompt, 500)
+              '{"verdict":"approve" أو "reject","confidence":0-100,"reason":"سبب عربي في جملتين كحد أقصى (أقل من 300 حرف)"}')
+    txt = call_claude(prompt, 800)
     if not txt:
         return None
     try:
@@ -964,7 +974,7 @@ def ai_review(r):
         v = str(j.get("verdict", "")).lower()
         return {"verdict": "approve" if v.startswith("approve") else "reject",
                 "confidence": int(j.get("confidence", 0)),
-                "reason": str(j.get("reason", ""))[:200]}
+                "reason": str(j.get("reason", ""))[:700]}
     except Exception:
         return None
 
@@ -1949,6 +1959,12 @@ def loop():
                 weekly_check()
             except Exception as e:
                 print(f"[week] error: {e}", flush=True)
+            if market_closed():
+                status["msg"] = "💤 السوق مغلق (عطلة نهاية الأسبوع) — يرجع البوت مع افتتاح الأحد"
+                status["t"] = time.time()
+                gc.collect()
+                time.sleep(CHECK_EVERY)
+                continue
             r = analyze()
             try:
                 scalp_step()
@@ -1966,13 +1982,16 @@ def loop():
                     and (r["dir"] != last["dir"] or time.time() - last["t"] > COOLDOWN)):
                 go = True
                 if ANTHROPIC_KEY:
+                    dt = time.time() - ai_state["t"]
+                    same_px = (ai_state["price"] is not None
+                               and abs(r["price"] - ai_state["price"]) < 3.0)
                     if (ai_state["rejected"] and ai_state["dir"] == r["dir"]
-                            and time.time() - ai_state["t"] < 1800):
-                        go = False                      # رُفضت قبل قليل، لا تكرر المراجعة
+                            and (dt < 1800 or (same_px and dt < 6 * 3600))):
+                        go = False                      # نفس الإشارة رُفضت قبل، لا تكرر المراجعة
                     else:
                         rev = ai_review(r)
                         rej = bool(rev and rev["verdict"] == "reject")
-                        ai_state.update(dir=r["dir"], t=time.time(), rejected=rej)
+                        ai_state.update(dir=r["dir"], t=time.time(), rejected=rej, price=r["price"])
                         if rej:
                             go = False
                             side = "شراء" if r["dir"] == 1 else "بيع"
