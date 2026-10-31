@@ -1210,24 +1210,42 @@ def journal_load():
     """يقرأ السجل من الرسالة المثبتة (لأن ملفات Render المجاني بتنمسح مع كل إعادة تشغيل)"""
     if journal["loaded"] or not TOKEN or not CHAT:
         return
-    journal["loaded"] = True
-    pm = (tg("getChat", chat_id=CHAT).get("result") or {}).get("pinned_message") or {}
+    res = tg("getChat", chat_id=CHAT)
+    if not res.get("ok"):                    # فشل الاتصال: لا نعتبره محمّل، نعيد المحاولة لاحقاً
+        print(f"[journal] getChat failed: {str(res)[:150]}", flush=True)
+        return
+    pm = (res.get("result") or {}).get("pinned_message") or {}
     txt = pm.get("text") or ""
     if txt.startswith(JTAG.strip()[:12]):
-        try:
-            db = json.loads(txt[txt.index("{"):])
-            for k in KINDS:
-                db["k"].setdefault(k, zk())
-                for r_ in RES:
-                    db["k"][k].setdefault(r_, 0)
-            journal["db"], journal["msg_id"] = db, pm.get("message_id")
-            print("[journal] loaded from pinned message", flush=True)
-        except Exception as e:
-            print(f"[journal] parse error: {e}", flush=True)
+        db = journal_parse(txt)
+        if db is None:
+            return                           # رسالة السجل موجودة بس ما انقرت: لا نكتب فوقها
+        journal["db"], journal["msg_id"] = db, pm.get("message_id")
+        print("[journal] loaded from pinned message", flush=True)
+    journal["loaded"] = True
+
+
+def journal_parse(txt):
+    try:
+        db = json.loads(txt[txt.index("{"):])
+        db.setdefault("k", {})
+        db.setdefault("last", [])
+        for k in KINDS:
+            db["k"].setdefault(k, zk())
+            for r_ in RES:
+                db["k"][k].setdefault(r_, 0)
+        return db
+    except Exception as e:
+        print(f"[journal] parse error: {e}", flush=True)
+        return None
 
 
 def journal_save():
     if not TOKEN or not CHAT:
+        return
+    journal_load()
+    if not journal["loaded"]:                # ما قدرنا نقرأ السجل القديم: لا ننشئ سجل فاضي يمسحه
+        print("[journal] save skipped (journal not loaded)", flush=True)
         return
     txt = JTAG + json.dumps(journal["db"], ensure_ascii=False, separators=(",", ":"))
     if journal["msg_id"]:
@@ -2094,6 +2112,17 @@ def commands():
                     reply(cid, "⚪ الوقف المتحرك متوقف: بعد الهدف 1 الوقف بيضل عند الدخول (متل قبل).")
                 elif text.startswith("/week"):
                     reply(cid, week_text())
+                elif text.startswith("/restore"):
+                    old = (msg.get("reply_to_message") or {}).get("text") or ""
+                    db = journal_parse(old) if old.startswith(JTAG.strip()[:12]) else None
+                    if db is None:
+                        reply(cid, "↩️ اعمل رد (Reply) على رسالة السجل القديمة 📒 واكتب /restore")
+                    else:
+                        journal_load()
+                        db["scalp_open"] = journal["db"].get("scalp_open") or db.get("scalp_open")
+                        journal["db"], journal["loaded"] = db, True
+                        journal_save()
+                        reply(cid, "✅ رجّعت السجل القديم.\n\n" + stats_text())
                 elif text.startswith("/stats_reset"):
                     journal_load()
                     journal["db"] = {"k": {k: zk() for k in KINDS}, "last": [],
