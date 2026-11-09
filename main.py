@@ -1293,7 +1293,7 @@ def fmt(r, header="تحليل الذهب", full=False):
 
 
 # ---------------- سجل النتائج (محفوظ برسالة مثبتة على تليجرام) ----------------
-KINDS = {"strong": "قوية 🚨", "fast": "سريعة ⚡", "range": "نطاق 🔄", "scalp": "سكالب ⚡⚡", "light": "خفيفة 🟡", "trend": "ترند 📈", "brt": "اختراق 🔁"}
+KINDS = {"strong": "قوية 🚨", "fast": "سريعة ⚡", "range": "نطاق 🔄", "scalp": "سكالب ⚡⚡", "light": "خفيفة 🟡", "trend": "ترند 📈", "brt": "اختراق 🔁", "ict": "ICT 🎯"}
 RES = {"tp": "🎯 هدف", "tr": "📈 وقف متحرك بربح", "sl": "🛑 وقف", "be": "⚪ تعادل", "exp": "⌛ انتهت"}
 JTAG = "📒 سجل البوت (لا تحذف ولا تلغي تثبيت هالرسالة)\n"
 
@@ -1851,6 +1851,146 @@ def brt_eval(m15, h1, price, hi_dirs):
             "tp": price + t * 2 * sd, "risk": sd}
 
 
+# ---------------- نموذج ICT 🎯 ----------------
+# بوقت الـKill Zone: السعر بيسحب سيولة (قاع/قمة آسيا أو امبارح أو سوينغ) ← بيكسر الهيكل باندفاع
+# تارك FVG ← بيرجع للـFVG وهو بمنطقة الخصم (للشراء) أو الغلاء (للبيع) ← دخول مع الترند الكبير.
+ict_mode = {"on": os.getenv("ICT_ON", "1") == "1"}
+ICT_KZ = {"لندن": (2, 5), "نيويورك": (7, 11)}           # ساعات نيويورك (الشتوي والصيفي تلقائياً)
+ICT_DISC = float(os.getenv("ICT_DISC", "0.5"))          # الدخول لازم يكون رجع 50% على الأقل من الموجة
+
+
+def _ny(ts):
+    ts = pd.Timestamp(ts)
+    return (ts.tz_localize("UTC") if ts.tzinfo is None else ts).tz_convert("America/New_York")
+
+
+def ict_kz(ts):
+    h = _ny(ts).hour
+    for name, (a, b) in ICT_KZ.items():
+        if a <= h < b:
+            return name
+    return None
+
+
+def ict_liq(m15, end):
+    """مستويات السيولة المعروفة قبل الشمعة رقم end: [(الاسم، المستوى، 1=قاع/-1=قمة)]"""
+    w = m15.iloc[max(0, end - 200):end]
+    if len(w) < 40:
+        return []
+    out = []
+    ny = w.index.tz_convert("America/New_York") if w.index.tz is not None else w.index.tz_localize("UTC").tz_convert("America/New_York")
+    recent = ny >= ny[-1] - pd.Timedelta(hours=15)
+    asia = w[recent & (ny.hour >= 20)]                   # جلسة آسيا 20:00-00:00 نيويورك
+    if len(asia) >= 8:
+        out += [("قاع آسيا", float(asia["Low"].min()), 1), ("قمة آسيا", float(asia["High"].max()), -1)]
+    days = pd.Series(session_day(w.index if w.index.tz is not None else w.index.tz_localize("UTC")), index=w.index)
+    keys = sorted(set(days))
+    if len(keys) >= 2:
+        pv = w[days == keys[-2]]
+        if len(pv) >= 20:
+            out += [("قاع امبارح", float(pv["Low"].min()), 1), ("قمة امبارح", float(pv["High"].max()), -1)]
+    sw = w.iloc[-40:-14]
+    if len(sw):
+        out += [("قاع سوينغ", float(sw["Low"].min()), 1), ("قمة سوينغ", float(sw["High"].max()), -1)]
+    return out
+
+
+def ict_eval(m15, price, hi_dirs, disc=None):
+    """صفقة ICT 🎯 على M15. الوقف ورا ذيل سحب السيولة، هدف 1R ثم 2R (متل باقي الأنواع)."""
+    disc = ICT_DISC if disc is None else disc
+    n = len(m15)
+    if n < 120:
+        return None
+    j = n - 2                                            # آخر شمعة مسكّرة
+    kz = ict_kz(m15.index[j])
+    if not kz:
+        return None
+    bias = [x for x in hi_dirs if x]
+    if not bias or len(set(bias)) > 1:                   # لازم الفريم الكبير (D1/H4) متفق وما في عكس
+        return None
+    d = bias[0]
+    H, L, C, O = m15["High"], m15["Low"], m15["Close"], m15["Open"]
+    a = float(atr(m15).iloc[j])
+    if not a > 0:
+        return None
+    # 1) سحب السيولة: أبعد طرف بآخر 16 شمعة
+    win = range(j - 16, j)
+    k = min(win, key=lambda i: float(L.iloc[i])) if d == 1 else max(win, key=lambda i: float(H.iloc[i]))
+    ext = float(L.iloc[k]) if d == 1 else float(H.iloc[k])
+    swept = None
+    for name, lv, side in ict_liq(m15, j - 16):
+        if side != d:
+            continue
+        depth = (lv - ext) * d                           # قديش نزل تحت القاع (أو طلع فوق القمة)
+        if 0.05 * a <= depth <= 1.5 * a and (float(C.iloc[j]) - lv) * d > 0:
+            if swept is None or abs(lv - ext) < abs(swept[1] - ext):
+                swept = (name, lv)
+    if not swept:
+        return None
+    # 2) كسر الهيكل (MSS): إغلاق ورا آخر قمة (أو قاع) قبل السحب، بشمعة اندفاع
+    pre = range(max(0, k - 8), k)
+    sh = max(float(H.iloc[i]) for i in pre) if d == 1 else min(float(L.iloc[i]) for i in pre)
+    mss = next((m for m in range(k + 1, j) if (float(C.iloc[m]) - sh) * d > 0), None)
+    if mss is None:
+        return None
+    if max(abs(float(C.iloc[m]) - float(O.iloc[m])) for m in range(k, mss + 1)) < 0.8 * a:
+        return None                                      # ما في اندفاع حقيقي
+    # 3) FVG انعمل بموجة الاندفاع، وما انكسر بإغلاق
+    gap = None
+    for i in range(min(mss + 1, j - 1), k + 1, -1):
+        if d == 1 and float(L.iloc[i]) - float(H.iloc[i - 2]) >= 0.2 * a:
+            gap = (float(H.iloc[i - 2]), float(L.iloc[i]), i)
+            break
+        if d == -1 and float(L.iloc[i - 2]) - float(H.iloc[i]) >= 0.2 * a:
+            gap = (float(H.iloc[i]), float(L.iloc[i - 2]), i)
+            break
+    if not gap:
+        return None
+    bot, top, gi = gap
+    after = C.iloc[gi + 1:j + 1]
+    if d == 1 and (after < bot).any() or d == -1 and (after > top).any():
+        return None
+    # 4) الدخول: آخر شمعة رجعت لمست الـFVG وسكّرت باتجاهنا
+    if d == 1:
+        touch = float(L.iloc[j]) <= top and float(C.iloc[j]) > bot and float(C.iloc[j]) >= float(O.iloc[j])
+    else:
+        touch = float(H.iloc[j]) >= bot and float(C.iloc[j]) < top and float(C.iloc[j]) <= float(O.iloc[j])
+    if j <= gi or not touch:
+        return None
+    # 5) خصم/غلاء: السعر رجع نص الموجة على الأقل (من ذيل السحب لأبعد نقطة بعد الكسر)
+    far = float(H.iloc[k:j + 1].max()) if d == 1 else float(L.iloc[k:j + 1].min())
+    leg = abs(far - ext)
+    if leg <= 0 or abs(far - price) / leg < disc:
+        return None
+    sl = ext - d * 0.2 * a
+    sd = max(abs(price - sl), 3.0)
+    if sd > 3 * a:
+        return None
+    return {"dir": d, "entry": price, "sl": price - d * sd, "tp1": price + d * sd,
+            "tp": price + d * 2 * sd, "risk": sd, "kz": kz,
+            "ict_txt": f"سحب {swept[0]} ({swept[1]:.2f}) ← كسر هيكل ← رجوع لـFVG {bot:.2f}-{top:.2f}"}
+
+
+def ict_text(m15, price, hi_dirs):
+    """شرح الوضع الحالي حسب ICT (للأمر /ict)"""
+    now = pd.Timestamp.now(tz="UTC")
+    kz = ict_kz(now)
+    bias = [x for x in hi_dirs if x]
+    b = nm(bias[0]) if bias and len(set(bias)) == 1 else "مو واضح (D1 وH4 مختلفين أو محايدين)"
+    L = ["🎯 نموذج ICT", f"💰 السعر: {price:.2f}",
+         f"🧭 الاتجاه الكبير (D1/H4): {b}",
+         f"⏰ Kill Zone: {('شغالة الآن — جلسة ' + kz) if kz else 'لا (لندن 08-11 ونيويورك 13-17 بتوقيت ألمانيا تقريباً)'}",
+         "", "💧 مستويات السيولة:"]
+    rec = m15.iloc[-17:]
+    for name, lv, side in ict_liq(m15, len(m15) - 17):
+        hit = float(rec["Low"].min()) < lv if side == 1 else float(rec["High"].max()) > lv
+        L.append(f"{'🔻' if side == 1 else '🔺'} {name}: {lv:.2f}"
+                 f"{' ✅ انسحبت بآخر 4 ساعات' if hit else ''}")
+    L += ["", "الفكرة: بنستنى السعر يسحب سيولة عكس الاتجاه الكبير، يكسر الهيكل باندفاع، "
+              "وبعدين يرجع للـFVG ← هون الدخول."]
+    return "\n".join(L)
+
+
 def sim_r(raw, i, d, entry, sl, tp1, tp, maxbars, tr=None):
     """بترجع (R الحقيقي، رقم شمعة الخروج). افتراضياً حسب إعداد الوقف المتحرك الحالي."""
     return sim_trade(raw, i, d, entry, sl, tp1, tp, maxbars, trail["on"] if tr is None else tr)
@@ -1913,6 +2053,8 @@ def run_scalp_bt(cid):
             if len(h4) >= 60:
                 sigs.append(("trend", trend_eval(w, h1, o, [trend(h4)]), 16))
                 sigs.append(("brt", brt_eval(w, h1, o, [trend(h4)]), 16))
+                sigs.append(("ict", ict_eval(w, o, [trend(h4)]), 16))
+                sigs.append(("ict_x", ict_eval(w, o, [trend(h4)], disc=0.0), 16))
             if len(h4) >= 60 and trend(h4) == 0:
                 for v, L in (("range", False), ("range_l", True)):
                     sigs.append((v, range_eval(h1, w, o, lo_=L), 32))
@@ -1949,6 +2091,8 @@ def run_scalp_bt(cid):
                  ("m5", "M5 ابتلاع (اتجاه M15)", days5), ("m5p", "M5 ابتلاع أو Pin Bar", days5),
                  ("trend", "📈 مع الترند (رجوع EMA21)", days15),
                  ("brt", "🔁 اختراق وإعادة اختبار", days15),
+                 ("ict", "🎯 ICT (الحالي: بمنطقة خصم/غلاء)", days15),
+                 ("ict_x", "🎯 ICT بدون شرط الخصم/الغلاء", days15),
                  ("range", "🔄 النطاق الحالي", days15), ("range_l", "🔄 النطاق الأخف", days15)]
         L = [f"📊 مقارنة النسخ (بعد سبريد {SPREAD}$، جلسة لندن+نيويورك)",
              f"بعد الهدف 1: {'📈 وقف متحرك' if trail['on'] else '⚪ وقف ثابت عند الدخول'} (حسب الإعداد الحالي)"]
@@ -2055,7 +2199,11 @@ def _scalp_step():
     if news_block(now):                               # خبر قوي قريب: لا صفقات سكالب جديدة
         return
     px = float(m15["Close"].iloc[-1])
-    r, kind = scalp_eval(m15, h1, px, lo_=False), "scalp"
+    r, kind = None, "scalp"
+    if ict_mode["on"]:
+        r, kind = ict_eval(m15, px, snap.get("t_hi", [])), "ict"
+    if not r:
+        r, kind = scalp_eval(m15, h1, px, lo_=False), "scalp"
     if not r and loose["on"]:
         r, kind = scalp_eval(m15, h1, px, lo_=True), "light"
     if not r and trend_mode["on"]:
@@ -2065,9 +2213,10 @@ def _scalp_step():
     if r:
         side = "شراء 🟢" if r["dir"] == 1 else "بيع 🔴"
         title = {"light": "🟡 صفقة خفيفة (شروط أخف)", "trend": "📈 صفقة مع الترند (رجوع لـ EMA21)",
-                 "brt": "🔁 صفقة اختراق وإعادة اختبار"}.get(
+                 "brt": "🔁 صفقة اختراق وإعادة اختبار",
+                 "ict": f"🎯 صفقة ICT — جلسة {r.get('kz', '')}"}.get(
             kind, "⚡ صفقة سريعة (سكالب)")
-        send(f"{title} — {side}\n🎯 الدخول: {r['entry']:.2f}\n🛑 الوقف: {r['sl']:.2f}\n"
+        send(f"{title} — {side}\n" + (f"📝 {r['ict_txt']}\n" if kind == "ict" else "") + f"🎯 الدخول: {r['entry']:.2f}\n🛑 الوقف: {r['sl']:.2f}\n"
              f"✅ الهدف 1 (انقل الوقف للتعادل): {r['tp1']:.2f}\n💰 الهدف 2: {r['tp']:.2f}\n"
              f"{dist_line(r)}\n⚠️ صفقة قصيرة (حتى 4 ساعات)، حجم صغير.")
         r.setdefault("sl0", r["sl"])
@@ -2275,6 +2424,16 @@ def commands():
                 elif text.startswith("/brt_off"):
                     brt_mode["on"] = False
                     reply(cid, "⏸️ صفقات الاختراق وإعادة الاختبار متوقفة.")
+                elif text.startswith("/ict_on"):
+                    ict_mode["on"] = True
+                    reply(cid, "🎯 صفقات ICT مفعّلة: بوقت الـKill Zone (لندن 08-11 ونيويورك 13-17 بتوقيت ألمانيا تقريباً) "
+                               "البوت بيستنى سحب سيولة ← كسر هيكل ← رجوع للـFVG، مع اتجاه D1/H4.")
+                elif text.startswith("/ict_off"):
+                    ict_mode["on"] = False
+                    reply(cid, "⏸️ صفقات ICT متوقفة.")
+                elif text.startswith("/ict"):
+                    rr = analyze()
+                    reply(cid, ict_text(snap["m15"], rr["price"], snap.get("t_hi", [])))
                 elif text.startswith("/fast_on"):
                     fast_mode["on"] = True
                     reply(cid, "⚡ التوصيات السريعة مفعّلة (بالشروط الجديدة الأشد: ADX≥20 + متوسطات H1 "
@@ -2366,6 +2525,7 @@ def commands():
                     reply(cid, f"التلقائي: {'شغال' if auto['on'] else 'متوقف'}\n"
                                f"السكالب: {'شغال ⚡' if scalp['on'] else 'متوقف'}\n"
                                f"السريعة: {'شغالة ⚡ (شروط أشد)' if fast_mode['on'] else 'متوقفة'}\n"
+                               f"ICT: {'شغال 🎯' if ict_mode['on'] else 'متوقف'}\n"
                                f"الساعات: {'على مدار الساعة 🌍' if allday['on'] else 'لندن+نيويورك فقط'}\n"
                                f"الشروط: {'أصلية + خفيفة 🟡' if loose['on'] else 'أصلية بس 🔒'}\n"
                                f"بعد الهدف 1: {'وقف متحرك 📈' if trail['on'] else 'وقف ثابت عند الدخول ⚪'}\n"
@@ -2377,7 +2537,7 @@ def commands():
                                f"آخر فحص: {status['msg']} (قبل {int(time.time() - status.get('t', time.time()))} ثانية)"
                                f"{' ⚠️ الفحص التلقائي واقف!' if time.time() - status.get('t', time.time()) > 600 else ''}{t}")
                 elif text.startswith("/start"):
-                    reply(cid, "أهلاً! الأوامر:\n/tawsiya تحليل كامل\n/price السعر\n/levels قمة ونص وقاع شمعة امبارح\n/cam مستويات كامارلا لليوم\n/cam_on /cam_off تنبيهات كامارلا\n/ai قراءة السوق بالذكاء الاصطناعي مع الأخبار\n/backtest 180 اختبار الاستراتيجية على التاريخ\n/calib 4193.5 معايرة السعر على منصتك\n/auto_on /auto_off\n/scalp_on /scalp_off\n/fast_on /fast_off التوصيات السريعة ⚡\n/scalpbt مقارنة الشروط الحالية مع الأخف\n/loose_on /loose_off شروط أخف = صفقات أكتر\n/range_on /range_off تداول النطاق\n/news الأخبار القوية هذا الأسبوع\n/news_on /news_off فلتر الأخبار (مع تقرير بعد كل خبر)\n/trail_on /trail_off وقف متحرك بعد الهدف 1\n/week ملخص الأسبوع لحد هلأ (التقرير الكامل بيوصل كل أحد 20:00)\n/allday_on /allday_off توصيات على مدار الساعة\n/stats نتائج التوصيات\n/stats_reset تصفير السجل\n/status")
+                    reply(cid, "أهلاً! الأوامر:\n/tawsiya تحليل كامل\n/price السعر\n/levels قمة ونص وقاع شمعة امبارح\n/cam مستويات كامارلا لليوم\n/cam_on /cam_off تنبيهات كامارلا\n/ai قراءة السوق بالذكاء الاصطناعي مع الأخبار\n/backtest 180 اختبار الاستراتيجية على التاريخ\n/calib 4193.5 معايرة السعر على منصتك\n/auto_on /auto_off\n/scalp_on /scalp_off\n/ict وضع السوق حسب ICT (سيولة + Kill Zone)\n/ict_on /ict_off صفقات ICT 🎯\n/fast_on /fast_off التوصيات السريعة ⚡\n/scalpbt مقارنة الشروط الحالية مع الأخف\n/loose_on /loose_off شروط أخف = صفقات أكتر\n/range_on /range_off تداول النطاق\n/news الأخبار القوية هذا الأسبوع\n/news_on /news_off فلتر الأخبار (مع تقرير بعد كل خبر)\n/trail_on /trail_off وقف متحرك بعد الهدف 1\n/week ملخص الأسبوع لحد هلأ (التقرير الكامل بيوصل كل أحد 20:00)\n/allday_on /allday_off توصيات على مدار الساعة\n/stats نتائج التوصيات\n/stats_reset تصفير السجل\n/status")
         except Exception as e:
             status["msg"] = f"cmd error: {e}"
             print(f"[commands] error: {e}", flush=True)
