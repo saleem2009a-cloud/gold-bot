@@ -480,6 +480,119 @@ def daily_conf(lv, d, price, a):
     return out
 
 
+# ---------------- مستويات كامارلا (Camarilla) ----------------
+# اليوم بيسكّر 17:00 نيويورك (متل أغلب المنصات)، فمنبني شمعة امبارح من شموع الساعة
+cam = {"on": os.getenv("CAM_ON", "1") == "1", "day": None, "lv": None, "hit": set()}
+
+
+def session_day(idx):
+    """تاريخ جلسة الذهب لكل شمعة: 17:00 نيويورك = بداية يوم جديد"""
+    return (idx.tz_convert("America/New_York") + pd.Timedelta(hours=7)).date
+
+
+def camarilla(h1):
+    """مستويات كامارلا من قمة وقاع وإغلاق آخر جلسة مكتملة"""
+    if h1 is None or len(h1) < 30:
+        return None
+    days = pd.Series(session_day(h1.index), index=h1.index)
+    keys = sorted(set(days))
+    if len(keys) < 2:
+        return None
+    prev = h1[days == keys[-2]]
+    H, L, C = float(prev["High"].max()), float(prev["Low"].min()), float(prev["Close"].iloc[-1])
+    rg = H - L
+    if rg <= 0:
+        return None
+    k = rg * 1.1
+    return {"day": keys[-1], "H": H, "L": L, "C": C,
+            "R4": C + k / 2, "R3": C + k / 4, "R2": C + k / 6, "R1": C + k / 12,
+            "S1": C - k / 12, "S2": C - k / 6, "S3": C - k / 4, "S4": C - k / 2}
+
+
+def cam_where(lv, p):
+    if p > lv["R4"]:
+        return "فوق R4 ← اختراق صاعد، الاتجاه ممكن يكمل 🚀"
+    if p < lv["S4"]:
+        return "تحت S4 ← اختراق هابط، الاتجاه ممكن يكمل 🔻"
+    if p >= lv["R3"]:
+        return "بين R3 وR4 ← منطقة بيع محتملة (ارتداد) أو تجهيز لاختراق"
+    if p <= lv["S3"]:
+        return "بين S4 وS3 ← منطقة شراء محتملة (ارتداد) أو تجهيز لكسر"
+    return "بين S3 وR3 ← النطاق الطبيعي لليوم"
+
+
+def cam_text(lv, p=None, t_d1=None):
+    s = (f"📐 مستويات كامارلا لليوم\n"
+         f"(من جلسة امبارح: قمة {lv['H']:.2f} | قاع {lv['L']:.2f} | إغلاق {lv['C']:.2f})\n\n"
+         f"🚀 R4: {lv['R4']:.2f}  (كسرها = اختراق)\n"
+         f"🔴 R3: {lv['R3']:.2f}  (منطقة بيع/ارتداد)\n"
+         f"▫️ R2: {lv['R2']:.2f}\n▫️ R1: {lv['R1']:.2f}\n"
+         f"▫️ S1: {lv['S1']:.2f}\n▫️ S2: {lv['S2']:.2f}\n"
+         f"🟢 S3: {lv['S3']:.2f}  (منطقة شراء/ارتداد)\n"
+         f"🔻 S4: {lv['S4']:.2f}  (كسرها = اختراق)")
+    if p is not None:
+        s += f"\n\n💰 السعر الآن: {p:.2f}\n📍 {cam_where(lv, p)}"
+    if t_d1 is not None:
+        s += f"\n📈 ترند D1: {nm(t_d1)}"
+    return s
+
+
+def cam_check(price, h1, t_d1=0):
+    """بيبعت المستويات مع بداية كل يوم، وتنبيه لما السعر يوصل R3/S3 أو يخترق R4/S4.
+    تنبيهات للمتابعة بس، مو توصيات دخول."""
+    if not cam["on"]:
+        return
+    lv = camarilla(h1)
+    if not lv:
+        return
+    if cam["day"] != lv["day"]:
+        first = cam["day"] is None
+        cam.update(day=lv["day"], lv=lv, hit=set())
+        # بعد إعادة تشغيل البوت ما منعيد الرسالة إلا بأول 3 ساعات من اليوم
+        ny = pd.Timestamp.now(tz="UTC").tz_convert("America/New_York")
+        hrs = (ny.hour - 18) % 24
+        if not first or hrs < 3:
+            send(cam_text(lv, price, t_d1))
+        # المستويات اللي السعر أصلاً بعدها ما منبعت عنها تنبيه
+        for k in ("R3", "R4"):
+            if price >= lv[k]:
+                cam["hit"].add(k)
+        for k in ("S3", "S4"):
+            if price <= lv[k]:
+                cam["hit"].add(k)
+        return
+    cam["lv"] = lv
+    a = float(atr(h1).iloc[-1])
+    tol = max(0.15 * a, 1.0)
+    trend_note = {1: "⚠️ الترند اليومي صاعد، فالبيع هون ضد الترند (خطر أعلى).",
+                  -1: "⚠️ الترند اليومي هابط، فالشراء هون ضد الترند (خطر أعلى)."}
+    msgs = []
+    if "R4" not in cam["hit"] and price >= lv["R4"] + tol:
+        cam["hit"].update({"R4", "R3"})
+        msgs.append(f"🚀 كامارلا: السعر اخترق R4 ({lv['R4']:.2f}) وصار {price:.2f}\n"
+                    "اختراق صاعد: الأفضل ما تبيع عكسه. استنى إغلاق شمعة فوقها أو إعادة اختبار للتأكيد."
+                    + ("\n✅ مع الترند اليومي." if t_d1 == 1 else ""))
+    elif "R3" not in cam["hit"] and price >= lv["R3"] - tol:
+        cam["hit"].add("R3")
+        msgs.append(f"🔴 كامارلا: السعر وصل R3 ({lv['R3']:.2f}) — الآن {price:.2f}\n"
+                    f"منطقة ارتداد محتملة للبيع. راقب شمعة رفض قبل أي دخول. R4 {lv['R4']:.2f} = حد الاختراق."
+                    + ("\n" + trend_note[1] if t_d1 == 1 else ""))
+    if "S4" not in cam["hit"] and price <= lv["S4"] - tol:
+        cam["hit"].update({"S4", "S3"})
+        msgs.append(f"🔻 كامارلا: السعر كسر S4 ({lv['S4']:.2f}) وصار {price:.2f}\n"
+                    "اختراق هابط: الأفضل ما تشتري عكسه. استنى إغلاق شمعة تحتها أو إعادة اختبار للتأكيد."
+                    + ("\n✅ مع الترند اليومي." if t_d1 == -1 else ""))
+    elif "S3" not in cam["hit"] and price <= lv["S3"] + tol:
+        cam["hit"].add("S3")
+        msgs.append(f"🟢 كامارلا: السعر وصل S3 ({lv['S3']:.2f}) — الآن {price:.2f}\n"
+                    f"منطقة ارتداد محتملة للشراء. راقب شمعة رفض قبل أي دخول. S4 {lv['S4']:.2f} = حد الكسر."
+                    + ("\n" + trend_note[-1] if t_d1 == -1 else ""))
+    for m in msgs:
+        nb = news_block()
+        send(m + (f"\n📰 انتبه: خبر قوي قريب ({nb['title']})." if nb else "")
+             + "\n(تنبيه مستوى للمتابعة، مو توصية)")
+
+
 # ---------------- التحليل الكامل ----------------
 def evaluate(d1, h1, h4, m15, price, hour, mom=None,
              orb=("pre", "قبل الافتتاح أو لا بيانات"), today=None):
@@ -1985,6 +2098,10 @@ def loop():
                 continue
             r = analyze()
             try:
+                cam_check(r["price"], snap.get("h1"), r.get("t_d1", 0))
+            except Exception as e:
+                print(f"[cam] error: {e}", flush=True)
+            try:
                 scalp_step()
             except Exception as e:
                 print(f"[scalp] error: {e}", flush=True)
@@ -2193,6 +2310,18 @@ def commands():
                         bt["running"] = True
                         threading.Thread(target=run_backtest, args=(cid, min(max(days, 30), 600)),
                                          daemon=True).start()
+                elif text.startswith("/cam_on"):
+                    cam["on"] = True
+                    reply(cid, "📐 تنبيهات كامارلا مفعّلة: المستويات بتوصلك مع بداية كل يوم (منتصف الليل بتوقيت ألمانيا تقريباً)، "
+                               "وتنبيه لما السعر يوصل R3/S3 أو يخترق R4/S4.")
+                elif text.startswith("/cam_off"):
+                    cam["on"] = False
+                    reply(cid, "⏸️ تنبيهات كامارلا متوقفة (الأمر /cam لسا شغال).")
+                elif text.startswith("/cam"):
+                    rr = analyze()
+                    lv = camarilla(snap.get("h1"))
+                    reply(cid, cam_text(lv, rr["price"], rr.get("t_d1")) if lv
+                          else "ما في بيانات كافية لحساب كامارلا.")
                 elif text.startswith("/levels"):
                     rr = analyze()
                     lv = daily_levels(get("1d", "2y", 3600))
@@ -2240,6 +2369,7 @@ def commands():
                                f"الساعات: {'على مدار الساعة 🌍' if allday['on'] else 'لندن+نيويورك فقط'}\n"
                                f"الشروط: {'أصلية + خفيفة 🟡' if loose['on'] else 'أصلية بس 🔒'}\n"
                                f"بعد الهدف 1: {'وقف متحرك 📈' if trail['on'] else 'وقف ثابت عند الدخول ⚪'}\n"
+                               f"كامارلا: {'شغالة 📐' if cam['on'] else 'متوقفة'}\n"
                                f"فلتر الأخبار: {'شغال 📰' if news['on'] else 'متوقف'}"
                                f"{(' ⚠️ ' + news['err']) if news['err'] else ''}\n"
                                f"البيانات: {used['sym']}"
@@ -2247,7 +2377,7 @@ def commands():
                                f"آخر فحص: {status['msg']} (قبل {int(time.time() - status.get('t', time.time()))} ثانية)"
                                f"{' ⚠️ الفحص التلقائي واقف!' if time.time() - status.get('t', time.time()) > 600 else ''}{t}")
                 elif text.startswith("/start"):
-                    reply(cid, "أهلاً! الأوامر:\n/tawsiya تحليل كامل\n/price السعر\n/levels قمة ونص وقاع شمعة امبارح\n/ai قراءة السوق بالذكاء الاصطناعي مع الأخبار\n/backtest 180 اختبار الاستراتيجية على التاريخ\n/calib 4193.5 معايرة السعر على منصتك\n/auto_on /auto_off\n/scalp_on /scalp_off\n/fast_on /fast_off التوصيات السريعة ⚡\n/scalpbt مقارنة الشروط الحالية مع الأخف\n/loose_on /loose_off شروط أخف = صفقات أكتر\n/range_on /range_off تداول النطاق\n/news الأخبار القوية هذا الأسبوع\n/news_on /news_off فلتر الأخبار (مع تقرير بعد كل خبر)\n/trail_on /trail_off وقف متحرك بعد الهدف 1\n/week ملخص الأسبوع لحد هلأ (التقرير الكامل بيوصل كل أحد 20:00)\n/allday_on /allday_off توصيات على مدار الساعة\n/stats نتائج التوصيات\n/stats_reset تصفير السجل\n/status")
+                    reply(cid, "أهلاً! الأوامر:\n/tawsiya تحليل كامل\n/price السعر\n/levels قمة ونص وقاع شمعة امبارح\n/cam مستويات كامارلا لليوم\n/cam_on /cam_off تنبيهات كامارلا\n/ai قراءة السوق بالذكاء الاصطناعي مع الأخبار\n/backtest 180 اختبار الاستراتيجية على التاريخ\n/calib 4193.5 معايرة السعر على منصتك\n/auto_on /auto_off\n/scalp_on /scalp_off\n/fast_on /fast_off التوصيات السريعة ⚡\n/scalpbt مقارنة الشروط الحالية مع الأخف\n/loose_on /loose_off شروط أخف = صفقات أكتر\n/range_on /range_off تداول النطاق\n/news الأخبار القوية هذا الأسبوع\n/news_on /news_off فلتر الأخبار (مع تقرير بعد كل خبر)\n/trail_on /trail_off وقف متحرك بعد الهدف 1\n/week ملخص الأسبوع لحد هلأ (التقرير الكامل بيوصل كل أحد 20:00)\n/allday_on /allday_off توصيات على مدار الساعة\n/stats نتائج التوصيات\n/stats_reset تصفير السجل\n/status")
         except Exception as e:
             status["msg"] = f"cmd error: {e}"
             print(f"[commands] error: {e}", flush=True)
