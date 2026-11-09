@@ -66,7 +66,7 @@ ai_state = {"dir": None, "t": 0, "rejected": False, "price": None}
 ai_err = {"msg": ""}
 bt = {"running": False}
 snap = {}
-scalp = {"on": os.getenv("SCALP_ON", "1") == "1", "sig": None, "t0": None, "t_orig": None, "be": False, "bar": None}
+scalp = {"on": os.getenv("SCALP_ON", "0") == "1", "sig": None, "t0": None, "t_orig": None, "be": False, "bar": None}
 SCALP_EMAD = float(os.getenv("SCALP_EMAD", "1.5"))   # أقصى بعد عن EMA21 (ATR) — 1.5 أحسن من 1.2 باختبار 60 يوم
 SPREAD = 0.35                            # تكلفة تقريبية بالدولار لكل صفقة (للاختبار)
 # وقف متحرك بعد الهدف 1: الوقف بيلحق أفضل سعر وصلته الصفقة على بعد TRAIL_K × R
@@ -1895,8 +1895,10 @@ def ict_liq(m15, end):
     return out
 
 
-def ict_eval(m15, price, hi_dirs, disc=None):
-    """صفقة ICT 🎯 على M15. الوقف ورا ذيل سحب السيولة، هدف 1R ثم 2R (متل باقي الأنواع)."""
+def ict_eval(m15, h1, price, hi_dirs, disc=None):
+    """صفقة ICT 🎯 على M15. الاتجاه من H1 (وD1/H4 مش معاكسين)، سحب سيولة بآخر 6 ساعات،
+    كسر هيكل باندفاع، ودخول من FVG أو OB. الوقف ورا ذيل السحب، هدف 1R ثم 2R.
+    (نسخة 9-11-2026: فرصة وحدة. إذا /scalpbt ما طلع ≥20 صفقة وربحان بالنصّين ← منطفيه.)"""
     disc = ICT_DISC if disc is None else disc
     n = len(m15)
     if n < 120:
@@ -1905,20 +1907,21 @@ def ict_eval(m15, price, hi_dirs, disc=None):
     kz = ict_kz(m15.index[j])
     if not kz:
         return None
-    bias = [x for x in hi_dirs if x]
-    if not bias or len(set(bias)) > 1:                   # لازم الفريم الكبير (D1/H4) متفق وما في عكس
+    if h1 is None or len(h1) < 60:
         return None
-    d = bias[0]
+    d = trend(h1)
+    if d == 0 or any(x == -d for x in hi_dirs):          # اتجاه H1، والفريم الكبير مش معاكس
+        return None
     H, L, C, O = m15["High"], m15["Low"], m15["Close"], m15["Open"]
     a = float(atr(m15).iloc[j])
     if not a > 0:
         return None
-    # 1) سحب السيولة: أبعد طرف بآخر 16 شمعة
-    win = range(j - 16, j)
+    # 1) سحب السيولة: أبعد طرف بآخر 24 شمعة (6 ساعات)
+    win = range(j - 24, j)
     k = min(win, key=lambda i: float(L.iloc[i])) if d == 1 else max(win, key=lambda i: float(H.iloc[i]))
     ext = float(L.iloc[k]) if d == 1 else float(H.iloc[k])
     swept = None
-    for name, lv, side in ict_liq(m15, j - 16):
+    for name, lv, side in ict_liq(m15, j - 24):
         if side != d:
             continue
         depth = (lv - ext) * d                           # قديش نزل تحت القاع (أو طلع فوق القمة)
@@ -1935,27 +1938,33 @@ def ict_eval(m15, price, hi_dirs, disc=None):
         return None
     if max(abs(float(C.iloc[m]) - float(O.iloc[m])) for m in range(k, mss + 1)) < 0.8 * a:
         return None                                      # ما في اندفاع حقيقي
-    # 3) FVG انعمل بموجة الاندفاع، وما انكسر بإغلاق
-    gap = None
+    # 3) مناطق الدخول من موجة الاندفاع: FVG، وOB (آخر شمعة عكسية قبل الكسر). كل وحدة ما انكسرت بإغلاق
+    zones = []
     for i in range(min(mss + 1, j - 1), k + 1, -1):
         if d == 1 and float(L.iloc[i]) - float(H.iloc[i - 2]) >= 0.2 * a:
-            gap = (float(H.iloc[i - 2]), float(L.iloc[i]), i)
+            zones.append(("FVG", float(H.iloc[i - 2]), float(L.iloc[i]), i))
             break
         if d == -1 and float(L.iloc[i - 2]) - float(H.iloc[i]) >= 0.2 * a:
-            gap = (float(H.iloc[i]), float(L.iloc[i - 2]), i)
+            zones.append(("FVG", float(H.iloc[i]), float(L.iloc[i - 2]), i))
             break
-    if not gap:
-        return None
-    bot, top, gi = gap
-    after = C.iloc[gi + 1:j + 1]
-    if d == 1 and (after < bot).any() or d == -1 and (after > top).any():
-        return None
-    # 4) الدخول: آخر شمعة رجعت لمست الـFVG وسكّرت باتجاهنا
-    if d == 1:
-        touch = float(L.iloc[j]) <= top and float(C.iloc[j]) > bot and float(C.iloc[j]) >= float(O.iloc[j])
-    else:
-        touch = float(H.iloc[j]) >= bot and float(C.iloc[j]) < top and float(C.iloc[j]) <= float(O.iloc[j])
-    if j <= gi or not touch:
+    for i in range(mss - 1, k - 1, -1):
+        if (float(C.iloc[i]) - float(O.iloc[i])) * d < 0:
+            zones.append(("OB", float(L.iloc[i]), float(H.iloc[i]), mss))
+            break
+    hit = None
+    for name, bot, top, gi in zones:
+        after = C.iloc[gi + 1:j + 1]
+        if j <= gi or (d == 1 and (after < bot).any()) or (d == -1 and (after > top).any()):
+            continue
+        # 4) الدخول: آخر شمعة رجعت لمست المنطقة وسكّرت باتجاهنا
+        if d == 1:
+            ok = float(L.iloc[j]) <= top and float(C.iloc[j]) > bot and float(C.iloc[j]) >= float(O.iloc[j])
+        else:
+            ok = float(H.iloc[j]) >= bot and float(C.iloc[j]) < top and float(C.iloc[j]) <= float(O.iloc[j])
+        if ok:
+            hit = (name, bot, top)
+            break
+    if not hit:
         return None
     # 5) خصم/غلاء: السعر رجع نص الموجة على الأقل (من ذيل السحب لأبعد نقطة بعد الكسر)
     far = float(H.iloc[k:j + 1].max()) if d == 1 else float(L.iloc[k:j + 1].min())
@@ -1968,7 +1977,7 @@ def ict_eval(m15, price, hi_dirs, disc=None):
         return None
     return {"dir": d, "entry": price, "sl": price - d * sd, "tp1": price + d * sd,
             "tp": price + d * 2 * sd, "risk": sd, "kz": kz,
-            "ict_txt": f"سحب {swept[0]} ({swept[1]:.2f}) ← كسر هيكل ← رجوع لـFVG {bot:.2f}-{top:.2f}"}
+            "ict_txt": f"سحب {swept[0]} ({swept[1]:.2f}) ← كسر هيكل ← رجوع لـ{hit[0]} {hit[1]:.2f}-{hit[2]:.2f}"}
 
 
 def ict_text(m15, price, hi_dirs):
@@ -2053,8 +2062,8 @@ def run_scalp_bt(cid):
             if len(h4) >= 60:
                 sigs.append(("trend", trend_eval(w, h1, o, [trend(h4)]), 16))
                 sigs.append(("brt", brt_eval(w, h1, o, [trend(h4)]), 16))
-                sigs.append(("ict", ict_eval(w, o, [trend(h4)]), 16))
-                sigs.append(("ict_x", ict_eval(w, o, [trend(h4)], disc=0.0), 16))
+                sigs.append(("ict", ict_eval(w, h1, o, [trend(h4)]), 16))
+                sigs.append(("ict_x", ict_eval(w, h1, o, [trend(h4)], disc=0.0), 16))
             if len(h4) >= 60 and trend(h4) == 0:
                 for v, L in (("range", False), ("range_l", True)):
                     sigs.append((v, range_eval(h1, w, o, lo_=L), 32))
@@ -2157,7 +2166,10 @@ def scalp_step():
 
 def _scalp_step():
     m15, h1 = snap.get("m15"), snap.get("h1")
-    if not scalp["on"] or m15 is None:
+    if m15 is None:
+        return
+    if not scalp["sig"] and not (scalp["on"] or ict_mode["on"] or brt_mode["on"]
+                                 or trend_mode["on"] or loose["on"]):
         return
     now = pd.Timestamp.now(tz="UTC")
     s = scalp["sig"]
@@ -2201,8 +2213,8 @@ def _scalp_step():
     px = float(m15["Close"].iloc[-1])
     r, kind = None, "scalp"
     if ict_mode["on"]:
-        r, kind = ict_eval(m15, px, snap.get("t_hi", [])), "ict"
-    if not r:
+        r, kind = ict_eval(m15, h1, px, snap.get("t_hi", [])), "ict"
+    if not r and scalp["on"]:
         r, kind = scalp_eval(m15, h1, px, lo_=False), "scalp"
     if not r and loose["on"]:
         r, kind = scalp_eval(m15, h1, px, lo_=True), "light"
@@ -2446,7 +2458,7 @@ def commands():
                     reply(cid, "⚡ وضع السكالب مفعّل.")
                 elif text.startswith("/scalp_off"):
                     scalp["on"] = False
-                    reply(cid, "⏸️ السكالب متوقف")
+                    reply(cid, "⏸️ السكالب متوقف (ICT والاختراق والنطاق لسا شغالين).")
                 elif text.startswith("/validate"):
                     if bt["running"]:
                         reply(cid, "اختبار شغال حالياً، انتظر النتيجة.")
