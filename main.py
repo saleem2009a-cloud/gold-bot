@@ -354,7 +354,161 @@ def cycle(d1, today=None):
         res["support"] = 1
     elif high_hit and not low_hit:
         res["support"] = -1
+    res["lo_date"] = d1.index[sl].date() if sl is not None else None
+    res["hi_date"] = d1.index[sh].date() if sh is not None else None
     return res
+
+
+# ---------------- التحليل الزمني: دورات H1/H4 + توقيت الجلسات ----------------
+TF_FIB = [13, 21, 34, 55, 89]                    # أعداد شموع فيبوناتشي من آخر قمة/قاع
+TIME_W = {"kz": 5, "dead": -5}                   # نقاط التوقيت بالسكور
+timef = {"on": os.getenv("TIMEF_ON", "0") == "1"}   # فلتر الوقت الميت للتوصيات القوية/السريعة (مطفي لحد ما يثبته الباك تست)
+
+
+def last_swings(df, w=3, look=300):
+    """رقم شمعة آخر قمة وآخر قاع (فراكتال w من كل جهة)"""
+    h, l, n = df["High"].to_numpy(), df["Low"].to_numpy(), len(df)
+    sh = sl = None
+    for i in range(n - w - 1, max(w, n - look) - 1, -1):
+        if sh is None and h[i] == h[i - w:i + w + 1].max():
+            sh = i
+        if sl is None and l[i] == l[i - w:i + w + 1].min():
+            sl = i
+        if sh is not None and sl is not None:
+            break
+    return sh, sl
+
+
+def cycle_tf(df, name, w=3, look=300):
+    """دورة زمنية على فريم صغير: عدد الشموع من آخر قاع/قمة لما يطابق رقم فيبوناتشي (±1) = نافذة انعكاس.
+    نفس منطق الدورة اليومية: نافذة من القاع تدعم الشراء، ومن القمة تدعم البيع."""
+    res = {"support": 0, "txt": f"{name}: لا بيانات", "lo": None, "hi": None}
+    if df is None or len(df) < 2 * w + 20:
+        return res
+    sh, sl = last_swings(df, w, look)
+    cur = len(df) - 1                            # الشمعة الحالية (قيد التكوين)
+    lines, low_hit, high_hit = [], False, False
+    for idx_, lbl in ((sl, "القاع"), (sh, "القمة")):
+        if idx_ is None:
+            continue
+        k = cur - idx_
+        hit = [x for x in TF_FIB if abs(k - x) <= 1]
+        nxt = next((x for x in TF_FIB if x - k > 1), None)
+        res["lo" if lbl == "القاع" else "hi"] = {"k": k, "next": nxt, "t": df.index[idx_]}
+        if lbl == "القاع":
+            low_hit = bool(hit)
+        else:
+            high_hit = bool(hit)
+        lines.append(f"من {lbl} {k} شمعة" + (f" 🔁 دورة {hit[0]}" if hit else ""))
+    res["txt"] = f"{name}: " + (" | ".join(lines) if lines else "لا قمم/قيعان واضحة")
+    if low_hit and not high_hit:
+        res["support"] = 1
+    elif high_hit and not low_hit:
+        res["support"] = -1
+    return res
+
+
+# نوافذ التوقيت بساعات نيويورك (بالدقائق) — الصيفي والشتوي تلقائياً
+TIME_KZ = [("كيل زون لندن", 2 * 60, 5 * 60), ("كيل زون نيويورك", 7 * 60, 10 * 60 + 30)]
+TIME_MACRO = [(8 * 60 + 50, 9 * 60 + 10), (9 * 60 + 50, 10 * 60 + 10), (10 * 60 + 50, 11 * 60 + 10),
+              (13 * 60 + 10, 13 * 60 + 40)]      # ماكرو ICT: دقائق بيتحرك فيها السعر لسحب السيولة
+TIME_DEAD = [("استراحة غدا نيويورك", 12 * 60, 13 * 60 + 30), ("قبل إغلاق نيويورك", 15 * 60 + 30, 17 * 60),
+             ("جلسة آسيا (سيولة ضعيفة)", 19 * 60, 24 * 60), ("جلسة آسيا (سيولة ضعيفة)", 0, 2 * 60)]
+
+
+def session_time(ts=None):
+    """تصنيف التوقيت: kz = وقت حركة قوية، dead = وقت ميت/سيولة ضعيفة، normal = عادي"""
+    ny = _ny(ts if ts is not None else pd.Timestamp.now(tz="UTC"))
+    m = ny.hour * 60 + ny.minute
+    macro = any(a <= m < b for a, b in TIME_MACRO)
+    for name, a, b in TIME_KZ:
+        if a <= m < b:
+            return {"kind": "kz", "name": name + (" + ماكرو ⚡" if macro else ""), "macro": macro}
+    if macro:
+        return {"kind": "kz", "name": "ماكرو ICT ⚡", "macro": True}
+    for name, a, b in TIME_DEAD:
+        if a <= m < b:
+            return {"kind": "dead", "name": name, "macro": False}
+    return {"kind": "normal", "name": "توقيت عادي", "macro": False}
+
+
+def next_kz(ts=None):
+    """أول بداية كيل زون/ماكرو جاية (والسوق مفتوح)"""
+    t = (ts if ts is not None else pd.Timestamp.now(tz="UTC")).floor("5min")
+    cur = session_time(t)["kind"] == "kz"
+    for _ in range(12 * 48):                     # لحد يومين لقدام
+        t += pd.Timedelta(minutes=5)
+        k = session_time(t)["kind"] == "kz"
+        if k and not cur and not market_closed(t):
+            return t, session_time(t)["name"]
+        cur = k
+    return None, ""
+
+
+def to_local(ts):
+    try:
+        from zoneinfo import ZoneInfo
+        return pd.Timestamp(ts).tz_convert(ZoneInfo(os.getenv("TZ_LOCAL", "Europe/Berlin")))
+    except Exception:
+        return pd.Timestamp(ts)
+
+
+def time_text(d1, h4, h1):
+    """تقرير /time: الدورات الحالية + النوافذ الجاية + التوقيت"""
+    now = pd.Timestamp.now(tz="UTC")
+    today = now.date()
+    loc = to_local(now)
+    DN = ["الإثنين", "الثلاثاء", "الأربعاء", "الخميس", "الجمعة", "السبت", "الأحد"]
+    L = [f"⏰ التحليل الزمني للذهب — {DN[loc.weekday()]} {loc:%d/%m %H:%M}", ""]
+    st = session_time(now)
+    L.append(f"🕐 الآن: {st['name']}" + (" ✅ وقت حركة قوية" if st["kind"] == "kz" else
+                                         (" ⚠️ وقت ميت، الأفضل تتجنب الدخول" if st["kind"] == "dead" else "")))
+    if market_closed(now):
+        L.append("💤 السوق مغلق حالياً")
+    t, nm_ = next_kz(now)
+    if t is not None:
+        L.append(f"⏭️ الوقت القوي الجاي: {nm_} الساعة {to_local(t):%H:%M} ({DN[to_local(t).weekday()]})")
+    L += ["", "📅 الدورة اليومية (فيبو 21-144 / جان 90-360 يوم):"]
+    cyc = cycle(d1, today)
+    L.append(cyc["txt"])
+    up = []
+    for key, lbl, eff in (("lo_date", "من القاع", "🟢 تدعم الشراء"), ("hi_date", "من القمة", "🔴 تدعم البيع")):
+        base = cyc.get(key)
+        if base is None:
+            continue
+        for x in FIB + GANN:
+            tgt = base + timedelta(days=x)
+            if -1 <= (tgt - today).days <= 30:
+                up.append((tgt, f"• {tgt:%d/%m} ({DN[tgt.weekday()]}): دورة {x} يوم {lbl} {base:%d/%m} — {eff}"))
+    if up:
+        L.append("النوافذ القريبة (±يوم):")
+        L += [s for _, s in sorted(up)]
+    else:
+        L.append("لا نوافذ يومية خلال الشهر الجاي.")
+    L += ["", "🕓 دورات H4 و H1 (فيبو 13-89 شمعة):"]
+    bias = cyc["support"]
+    for df, name, hrs in ((h4, "H4", 4), (h1, "H1", 1)):
+        c = cycle_tf(df, name)
+        bias += c["support"]
+        L.append(c["txt"] + (" ← 🟢 تدعم الشراء" if c["support"] == 1 else
+                             (" ← 🔴 تدعم البيع" if c["support"] == -1 else "")))
+        for key, lbl in (("lo", "القاع"), ("hi", "القمة")):
+            v = c.get(key)
+            if v and v["next"]:
+                rem = v["next"] - v["k"] - 1                  # بداية النافذة (±1 شمعة)
+                e, left = now, rem * hrs                       # نعدّ ساعات التداول بس (بنتخطى العطلة)
+                while left > 0:
+                    e += pd.Timedelta(hours=1)
+                    if not market_closed(e):
+                        left -= 1
+                eta = to_local(e)
+                L.append(f"   ↳ نافذة {v['next']} من {lbl} بعد ~{rem} شمعة (≈ {DN[eta.weekday()]} {eta:%H:%M})")
+    L += ["", "🧭 الخلاصة الزمنية: " + ("🟢 الوقت يميل للشراء" if bias > 0 else
+                                       ("🔴 الوقت يميل للبيع" if bias < 0 else "⚪ لا ميل زمني واضح")),
+          f"فلتر الوقت الميت: {'شغال 🔒' if timef['on'] else 'متوقف'} (/timef_on /timef_off)",
+          "ℹ️ الدورة = نافذة احتمال انعكاس، مو إشارة لحالها. البوت بيضيفها للسكور مع باقي الشروط.",
+          "الأوقات الجاية بالشموع تقريبية (ما بتحسب العطل وتوقف السوق)."]
+    return "\n".join(L)
 
 
 # ---------------- مفاهيم السيولة (SMC) ----------------
@@ -595,12 +749,16 @@ def cam_check(price, h1, t_d1=0):
 
 # ---------------- التحليل الكامل ----------------
 def evaluate(d1, h1, h4, m15, price, hour, mom=None,
-             orb=("pre", "قبل الافتتاح أو لا بيانات"), today=None):
+             orb=("pre", "قبل الافتتاح أو لا بيانات"), today=None, ts=None):
     orb_state, orb_txt = orb
     mom = mom or {"15": 0.0, "1h": 0.0, "2h": 0.0}
     t_d1, t_h4 = trend(d1), trend(h4)
     cyc = cycle(d1, today)
-    r = {"price": price, "t_d1": t_d1, "t_h4": t_h4, "cycle": cyc["txt"], "mom": mom,
+    c4, c1 = cycle_tf(h4, "H4"), cycle_tf(h1, "H1")
+    st = session_time(ts)
+    tline = (f"{cyc['txt']}\n⏳ {c4['txt']}\n⏳ {c1['txt']}\n"
+             f"🕐 التوقيت: {st['name']}{' ✅' if st['kind'] == 'kz' else (' ⚠️' if st['kind'] == 'dead' else '')}")
+    r = {"price": price, "t_d1": t_d1, "t_h4": t_h4, "cycle": tline, "mom": mom, "sess": st,
          "orb": orb_txt, "dir": None, "score": 0, "notes": [], "missing": [],
          "met": 0, "elite": False, "in_session": SESSION[0] <= hour < SESSION[1]}
     if t_h4 == 0 or t_d1 == -t_h4:
@@ -681,9 +839,26 @@ def evaluate(d1, h1, h4, m15, price, hour, mom=None,
     if orb_state == d:
         score += 5
         notes.append("اختراق نطاق لندن باتجاه الصفقة (+5)")
+    # ---- التحليل الزمني ----
     if cyc["support"] == d:
+        score += 10
+        notes.append("نافذة دورة زمنية يومية تدعم (+10)")
+    elif cyc["support"] == -d:
+        score -= 5
+        notes.append("الدورة اليومية عكس الصفقة (-5)")
+    if c4["support"] == d:
         score += 5
-        notes.append("نافذة دورة زمنية تدعم (+5)")
+        notes.append("دورة H4 تدعم (+5)")
+    if c1["support"] == d:
+        score += 5
+        notes.append("دورة H1 تدعم (+5)")
+    if st["kind"] == "kz":
+        score += TIME_W["kz"]
+        notes.append(f"توقيت قوي: {st['name']} (+{TIME_W['kz']})")
+    elif st["kind"] == "dead":
+        score += TIME_W["dead"]
+        notes.append(f"وقت ميت: {st['name']} ({TIME_W['dead']})")
+    tcyc = cyc["support"] == d or c4["support"] == d or c1["support"] == d
 
     lv = daily_levels(d1)
     dc = daily_conf(lv, d, price, a)
@@ -737,11 +912,15 @@ def evaluate(d1, h1, h4, m15, price, hour, mom=None,
           "ابتلاع H1/H4": (e4 == d or e1 == d), "Pin Bar": (p4 == d or p1 == d),
           "كسر وهمي": bool(sw), "FVG": bool(fv), "OB": bool(ob), "دورة زمنية": cyc["support"] == d,
           "منطقة 50% يومي": dc["zone"], "قرب مستوى يومي": bool(dc["near"]),
-          "عكس مستوى يومي": dc["block"], "زخم معاكس": mblock}
+          "عكس مستوى يومي": dc["block"], "زخم معاكس": mblock,
+          "دورة H4": c4["support"] == d, "دورة H1": c1["support"] == d,
+          "كيل زون": st["kind"] == "kz", "وقت ميت": st["kind"] == "dead"}
     # القاعدة القوية (ثبتت بـ /validate على سنة ما استُخدمت بالاختيار): 2 أو أكثر من 3 عناصر
     core = ("D1 يوافق", "ابتلاع H1/H4", "سعر ممتد")
     got = [k for k in core if fl[k]]
-    elite = bool(len(got) >= 2 and not dc["block"] and not mblock)
+    elite_raw = bool(len(got) >= 2 and not dc["block"] and not mblock)
+    tblock = bool(timef["on"] and st["kind"] == "dead")     # فلتر الوقت الميت (اختياري /timef_on)
+    elite = elite_raw and not tblock
     trig = []
     if em == d:
         trig.append("ابتلاع M15")
@@ -764,13 +943,14 @@ def evaluate(d1, h1, h4, m15, price, hour, mom=None,
     # الجديدة: كمان لازم سوق فيه اتجاه (ADX≥20) + متوسطات H1 مرتبة معنا + تجمّع 3 عناصر على الأقل
     # (يعني إشارتين عند منطقة، أو إشارة عند منطقتين) بدل عنصر واحد من كل نوع.
     fast_old = bool(not elite and fl["D1 يوافق"] and trig and zone and not dc["block"] and not mblock)
-    fast = bool(fast_old and ax >= 20 and ema_ok and len(trig) + len(zone) >= 3)
+    fast = bool(fast_old and ax >= 20 and ema_ok and len(trig) + len(zone) >= 3 and not tblock)
     r.update(dir=d, score=final, notes=notes, missing=missing, met=4 - len(missing), flags=fl,
-             elite=elite, fast=fast, fast_old=fast_old, fast_txt=f"{' + '.join(trig)} عند {' / '.join(zone)}" if fast else "",
+             elite=elite, elite_raw=elite_raw, tcyc=tcyc, fast=fast, fast_old=fast_old, fast_txt=f"{' + '.join(trig)} عند {' / '.join(zone)}" if fast else "",
              elite_txt=" + ".join(got),
              need=([f"يلزم 2 من 3 (D1 يوافق، ابتلاع H1/H4، اندفاع مع الاتجاه)، متوفر: {' + '.join(got) or 'ولا واحد'}"]
                    if len(got) < 2 else []) +
                   (["السعر لاصق بمستوى امبارح المعاكس"] if dc["block"] else []) +
+                  ([f"وقت ميت ({st['name']}) وفلتر الوقت شغال"] if tblock and elite_raw else []) +
                   (["زخم قوي عكس الصفقة، ناطرين تأكيد انعكاس"] if mblock else []),
              levels=lv, dconf=dc,
              sweep=sw, fvg=fv, ob=ob, candle=candle_txt,
@@ -803,6 +983,7 @@ def analyze():
     hour = datetime.now(timezone.utc).hour
     snap["m15"], snap["h1"] = m15, h1
     snap["t_hi"] = [trend(d1), trend(h4)]
+    snap["d1"], snap["h4"] = d1, h4
     r = evaluate(d1, h1, h4, m15, price, hour, mom, london_orb(m15))
     if not fast_mode["on"]:
         r["fast"] = False
@@ -906,7 +1087,7 @@ def run_optimize(cid, days):
                 d1 = w.resample("1D").agg(OHLC).dropna()
                 if len(d1) < 60 or len(h4) < 60:
                     continue
-                r = evaluate(d1, w, h4, None, o, idx[i].hour, today=idx[i].date())
+                r = evaluate(d1, w, h4, None, o, idx[i].hour, today=idx[i].date(), ts=idx[i])
                 if not r["dir"]:
                     continue
                 cands.append({"i": i, "d": r["dir"], "score": r["score"], "f": r["flags"],
@@ -934,7 +1115,7 @@ def run_optimize(cid, days):
                     dlt = sum(a) / len(a) - sum(b) / len(b)
                     row.append(f"{dlt:+.2f}")
                     ok = ok and dlt > 0
-            neg = name in ("سعر ممتد", "عكس مستوى يومي", "زخم معاكس")
+            neg = name in ("سعر ممتد", "عكس مستوى يومي", "زخم معاكس", "وقت ميت")
             tag = "✅" if ok else ("⚠️" if neg else "▫️")
             if ok and not neg:
                 good.append(name)
@@ -982,7 +1163,7 @@ def run_validate(cid):
                 d1 = w.resample("1D").agg(OHLC).dropna()
                 if len(d1) < 60 or len(h4) < 60:
                     continue
-                r = evaluate(d1, w, h4, None, o, idx[i].hour, today=idx[i].date())
+                r = evaluate(d1, w, h4, None, o, idx[i].hour, today=idx[i].date(), ts=idx[i])
                 if not r["dir"]:
                     continue
                 cands.append({"i": i, "d": r["dir"], "score": r["score"], "f": r["flags"],
@@ -1153,6 +1334,7 @@ def run_backtest(cid, days):
         n = len(raw)
         start = max(300, n - int(days * 23))
         cands, last_i, errs = [], {1: -99, -1: -99}, 0
+        tinfo = []                                       # لكل توصية قوية: (نوع التوقيت، دورة داعمة؟، دورة يومية؟)
         fq = {"old": [], "new": []}                      # السريعة ⚡: الشروط القديمة مقابل الجديدة
         fl_i = {"old": {1: -99, -1: -99}, "new": {1: -99, -1: -99}}
         for i in range(start, n - 2):
@@ -1167,7 +1349,7 @@ def run_backtest(cid, days):
                 d1 = w.resample("1D").agg(OHLC).dropna()
                 if len(d1) < 60 or len(h4) < 60:
                     continue
-                r = evaluate(d1, w, h4, None, o, idx[i].hour, today=idx[i].date())
+                r = evaluate(d1, w, h4, None, o, idx[i].hour, today=idx[i].date(), ts=idx[i])
                 if not r["dir"]:
                     continue
                 d = r["dir"]
@@ -1176,13 +1358,14 @@ def run_backtest(cid, days):
                         fl_i[key][d] = i
                         fq[key].append(simulate(raw, i, d, r["entry"], r["sl"], r["tp1"], r["tp"],
                                                 tr=trail["on"]))
-                if not r["elite"]:
+                if not r["elite_raw"]:                   # بدون فلتر الوقت، لنقارن معه وبدونه تحت
                     continue
                 if i - last_i[d] < 6:
                     continue
                 last_i[d] = i
                 cands.append((r["score"], simulate(raw, i, d, r["entry"], r["sl"], r["tp1"], r["tp"]),
                               simulate(raw, i, d, r["entry"], r["sl"], r["tp1"], r["tp"], tr=True)))
+                tinfo.append((r["sess"]["kind"], r["tcyc"], r["flags"]["دورة زمنية"]))
             except Exception:
                 errs += 1
         L = [f"📊 اختبار تاريخي: آخر {days} يوم على H1 (سبوت)",
@@ -1215,6 +1398,24 @@ def run_backtest(cid, days):
                   f" | المفعّل حالياً: {'📈 المتحرك' if trail['on'] else '⚪ الثابت'} (/trail_on /trail_off)"]
         else:
             L.append("لا صفقات كافية للمقارنة.")
+        L += ["", "⏰ التحليل الزمني (على التوصيات القوية، بدون فلتر):"]
+
+        def tl(lbl, R):
+            if not R:
+                return f"{lbl}: لا صفقات"
+            s = stats(R)
+            pf = "∞" if s["pf"] == float("inf") else f"{s['pf']:.2f}"
+            return f"{lbl}: {s['n']} | نجاح {s['win']:.0f}% | متوسط {s['avg']:+.2f}R | المجموع {s['tot']:+.1f}R | PF {pf}"
+        R_ = [x for _, x, _ in cands]
+        L += [tl("🟢 بوقت كيل زون/ماكرو", [x for x, t in zip(R_, tinfo) if t[0] == "kz"]),
+              tl("⚪ توقيت عادي", [x for x, t in zip(R_, tinfo) if t[0] == "normal"]),
+              tl("🔴 وقت ميت", [x for x, t in zip(R_, tinfo) if t[0] == "dead"]),
+              tl("🔁 مع دورة زمنية داعمة (D1/H4/H1)", [x for x, t in zip(R_, tinfo) if t[1]]),
+              tl("▫️ بدون دورة داعمة", [x for x, t in zip(R_, tinfo) if not t[1]]),
+              tl("📅 مع الدورة اليومية بالذات", [x for x, t in zip(R_, tinfo) if t[2]]),
+              "", tl(f"🧪 لو فلتر الوقت الميت شغال (/timef_on){' ← مفعّل' if timef['on'] else ''}",
+                     [x for x, t in zip(R_, tinfo) if t[0] != "dead"]),
+              "القرار: إذا \"الوقت الميت\" متوسطه سالب و\"فلتر الوقت\" أعلى من الكل بفرق واضح وعدد ≥30، شغّل /timef_on."]
         L += ["", "⚡ التوصيات السريعة (بدون ابتلاع M15 لأنه ما في بيانات M15 تاريخية):"]
         for key, lbl in (("old", "الشروط القديمة"), ("new", "الشروط الجديدة (المفعّلة)")):
             if fq[key]:
@@ -1286,6 +1487,10 @@ def fmt(r, header="تحليل الذهب", full=False):
             L += ["• " + n for n in r["notes"]]
     if full:
         L.append(r["cycle"])
+    elif r.get("sess"):
+        st = r["sess"]
+        L.append(f"🕐 التوقيت: {st['name']}{' ✅' if st['kind'] == 'kz' else (' ⚠️' if st['kind'] == 'dead' else '')}"
+                 f"{' | 🔁 دورة زمنية داعمة' if r.get('tcyc') else ''}")
     if not r["in_session"]:
         L.append("🕒 خارج جلسة لندن/نيويورك: سيولة أقل")
     L.append("⚠️ تحليل آلي وليس توصية مالية. خاطر بأقل من 1% من الرصيد.")
@@ -2436,6 +2641,16 @@ def commands():
                 elif text.startswith("/brt_off"):
                     brt_mode["on"] = False
                     reply(cid, "⏸️ صفقات الاختراق وإعادة الاختبار متوقفة.")
+                elif text.startswith("/timef_on"):
+                    timef["on"] = True
+                    reply(cid, "🔒 فلتر الوقت الميت شغال: ما في توصيات قوية/سريعة وقت استراحة غدا نيويورك، "
+                               "وقبل الإغلاق، وجلسة آسيا. (للتجربة شوف قسم ⏰ بنتيجة /backtest)")
+                elif text.startswith("/timef_off"):
+                    timef["on"] = False
+                    reply(cid, "🔓 فلتر الوقت الميت متوقف: التوقيت بيأثر بالسكور بس.")
+                elif text.startswith("/time"):
+                    analyze()
+                    reply(cid, time_text(snap["d1"], snap["h4"], snap["h1"]))
                 elif text.startswith("/ict_on"):
                     ict_mode["on"] = True
                     reply(cid, "🎯 صفقات ICT مفعّلة: بوقت الـKill Zone (لندن 08-11 ونيويورك 13-17 بتوقيت ألمانيا تقريباً) "
@@ -2538,6 +2753,7 @@ def commands():
                                f"السكالب: {'شغال ⚡' if scalp['on'] else 'متوقف'}\n"
                                f"السريعة: {'شغالة ⚡ (شروط أشد)' if fast_mode['on'] else 'متوقفة'}\n"
                                f"ICT: {'شغال 🎯' if ict_mode['on'] else 'متوقف'}\n"
+                               f"فلتر الوقت الميت: {'شغال 🔒' if timef['on'] else 'متوقف'}\n"
                                f"الساعات: {'على مدار الساعة 🌍' if allday['on'] else 'لندن+نيويورك فقط'}\n"
                                f"الشروط: {'أصلية + خفيفة 🟡' if loose['on'] else 'أصلية بس 🔒'}\n"
                                f"بعد الهدف 1: {'وقف متحرك 📈' if trail['on'] else 'وقف ثابت عند الدخول ⚪'}\n"
@@ -2549,7 +2765,7 @@ def commands():
                                f"آخر فحص: {status['msg']} (قبل {int(time.time() - status.get('t', time.time()))} ثانية)"
                                f"{' ⚠️ الفحص التلقائي واقف!' if time.time() - status.get('t', time.time()) > 600 else ''}{t}")
                 elif text.startswith("/start"):
-                    reply(cid, "أهلاً! الأوامر:\n/tawsiya تحليل كامل\n/price السعر\n/levels قمة ونص وقاع شمعة امبارح\n/cam مستويات كامارلا لليوم\n/cam_on /cam_off تنبيهات كامارلا\n/ai قراءة السوق بالذكاء الاصطناعي مع الأخبار\n/backtest 180 اختبار الاستراتيجية على التاريخ\n/calib 4193.5 معايرة السعر على منصتك\n/auto_on /auto_off\n/scalp_on /scalp_off\n/ict وضع السوق حسب ICT (سيولة + Kill Zone)\n/ict_on /ict_off صفقات ICT 🎯\n/fast_on /fast_off التوصيات السريعة ⚡\n/scalpbt مقارنة الشروط الحالية مع الأخف\n/loose_on /loose_off شروط أخف = صفقات أكتر\n/range_on /range_off تداول النطاق\n/news الأخبار القوية هذا الأسبوع\n/news_on /news_off فلتر الأخبار (مع تقرير بعد كل خبر)\n/trail_on /trail_off وقف متحرك بعد الهدف 1\n/week ملخص الأسبوع لحد هلأ (التقرير الكامل بيوصل كل أحد 20:00)\n/allday_on /allday_off توصيات على مدار الساعة\n/stats نتائج التوصيات\n/stats_reset تصفير السجل\n/status")
+                    reply(cid, "أهلاً! الأوامر:\n/tawsiya تحليل كامل\n/price السعر\n/levels قمة ونص وقاع شمعة امبارح\n/time التحليل الزمني (دورات D1/H4/H1 + أوقات الحركة)\n/timef_on /timef_off فلتر الوقت الميت\n/cam مستويات كامارلا لليوم\n/cam_on /cam_off تنبيهات كامارلا\n/ai قراءة السوق بالذكاء الاصطناعي مع الأخبار\n/backtest 180 اختبار الاستراتيجية على التاريخ\n/calib 4193.5 معايرة السعر على منصتك\n/auto_on /auto_off\n/scalp_on /scalp_off\n/ict وضع السوق حسب ICT (سيولة + Kill Zone)\n/ict_on /ict_off صفقات ICT 🎯\n/fast_on /fast_off التوصيات السريعة ⚡\n/scalpbt مقارنة الشروط الحالية مع الأخف\n/loose_on /loose_off شروط أخف = صفقات أكتر\n/range_on /range_off تداول النطاق\n/news الأخبار القوية هذا الأسبوع\n/news_on /news_off فلتر الأخبار (مع تقرير بعد كل خبر)\n/trail_on /trail_off وقف متحرك بعد الهدف 1\n/week ملخص الأسبوع لحد هلأ (التقرير الكامل بيوصل كل أحد 20:00)\n/allday_on /allday_off توصيات على مدار الساعة\n/stats نتائج التوصيات\n/stats_reset تصفير السجل\n/status")
         except Exception as e:
             status["msg"] = f"cmd error: {e}"
             print(f"[commands] error: {e}", flush=True)
