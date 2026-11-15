@@ -2025,9 +2025,22 @@ def trend_eval(m15, h1, price, hi_dirs):
 
 
 brt_mode = {"on": os.getenv("BRT_ON", "1") == "1"}   # مفعّل: ربحان بالنصّين (26 صفقة، 13-10)
+BRT_EXT = float(os.getenv("BRT_EXT", "1.5"))   # فلتر الملاحقة: أقصى بعد عن EMA21 على H1 بوحدات ATR H1 (0 = بدون فلتر)
 
 
-def brt_eval(m15, h1, price, hi_dirs):
+def brt_extended(h1, price, t, mx=None):
+    """True إذا السعر ممدود كتير باتجاه الصفقة (بيع بعد هبوط كبير أو شراء بعد صعود كبير)."""
+    mx = BRT_EXT if mx is None else mx
+    if not mx:
+        return False
+    a = float(atr(h1).iloc[-2])
+    if not a > 0:
+        return False
+    e = float(ema(h1["Close"], 21).iloc[-2])
+    return (e - price) * t < 0 and abs(price - e) > mx * a
+
+
+def brt_eval(m15, h1, price, hi_dirs, ext=None):
     """اختراق وإعادة اختبار 🔁: مع اتجاه H1 (والفريم الكبير مش معاكس)،
     السعر سكّر فوق قمة سابقة (أو تحت قاع)، رجع لمسها وسكّر شمعة باتجاه الترند.
     الوقف ورا المستوى (أقل شي 1×ATR و3$)، هدف 1R ثم 2R."""
@@ -2035,6 +2048,8 @@ def brt_eval(m15, h1, price, hi_dirs):
         return None
     t = trend(h1)
     if t == 0 or any(x == -t for x in hi_dirs) or not any(x == t for x in hi_dirs):
+        return None
+    if brt_extended(h1, price, t, ext):                # السعر ماشي كتير: لا تلاحق
         return None
     hi, lo, c, o = m15["High"], m15["Low"], m15["Close"], m15["Open"]
     a = float(atr(m15).iloc[-2])
@@ -2267,6 +2282,7 @@ def run_scalp_bt(cid):
             if len(h4) >= 60:
                 sigs.append(("trend", trend_eval(w, h1, o, [trend(h4)]), 16))
                 sigs.append(("brt", brt_eval(w, h1, o, [trend(h4)]), 16))
+                sigs.append(("brt_x", brt_eval(w, h1, o, [trend(h4)], ext=0), 16))
                 sigs.append(("ict", ict_eval(w, h1, o, [trend(h4)]), 16))
                 sigs.append(("ict_x", ict_eval(w, h1, o, [trend(h4)], disc=0.0), 16))
             if len(h4) >= 60 and trend(h4) == 0:
@@ -2304,7 +2320,8 @@ def run_scalp_bt(cid):
                  ("pin15", "ابتلاع أو Pin Bar، EMA 1.5", days15), ("loose", "الأخف (Pin Bar، EMA 2.0)", days15),
                  ("m5", "M5 ابتلاع (اتجاه M15)", days5), ("m5p", "M5 ابتلاع أو Pin Bar", days5),
                  ("trend", "📈 مع الترند (رجوع EMA21)", days15),
-                 ("brt", "🔁 اختراق وإعادة اختبار", days15),
+                 ("brt", f"🔁 اختراق (الحالي: فلتر ملاحقة {BRT_EXT}×ATR)", days15),
+                 ("brt_x", "🔁 اختراق القديم (بدون فلتر ملاحقة)", days15),
                  ("ict", "🎯 ICT (الحالي: بمنطقة خصم/غلاء)", days15),
                  ("ict_x", "🎯 ICT بدون شرط الخصم/الغلاء", days15),
                  ("range", "🔄 النطاق الحالي", days15), ("range_l", "🔄 النطاق الأخف", days15)]
@@ -2427,6 +2444,9 @@ def _scalp_step():
         r, kind = trend_eval(m15, h1, px, snap.get("t_hi", [])), "trend"
     if not r and brt_mode["on"]:
         r, kind = brt_eval(m15, h1, px, snap.get("t_hi", [])), "brt"
+    if r and active["sig"] and active["sig"]["dir"] == r["dir"]:
+        print(f"[scalp] skip {kind}: توصية {active.get('kind')} مفتوحة بنفس الاتجاه", flush=True)
+        r = None                                      # لا تضاعف المخاطرة على نفس الحركة
     if r:
         side = "شراء 🟢" if r["dir"] == 1 else "بيع 🔴"
         title = {"light": "🟡 صفقة خفيفة (شروط أخف)", "trend": "📈 صفقة مع الترند (رجوع لـ EMA21)",
@@ -2480,6 +2500,7 @@ def loop():
             if (auto["on"] and (r["elite"] or r.get("fast") or r.get("range")) and live_ok()
                     and not nb
                     and active["sig"] is None
+                    and not (scalp["sig"] and scalp["sig"]["dir"] == r["dir"])   # صفقة سريعة مفتوحة بنفس الاتجاه
                     and (r["dir"] != last["dir"] or time.time() - last["t"] > COOLDOWN)):
                 go = True
                 if ANTHROPIC_KEY:
