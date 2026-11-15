@@ -2025,7 +2025,7 @@ def trend_eval(m15, h1, price, hi_dirs):
 
 
 brt_mode = {"on": os.getenv("BRT_ON", "1") == "1"}   # مفعّل: ربحان بالنصّين (26 صفقة، 13-10)
-BRT_EXT = float(os.getenv("BRT_EXT", "1.5"))   # فلتر الملاحقة: أقصى بعد عن EMA21 على H1 بوحدات ATR H1 (0 = بدون فلتر)
+BRT_EXT = float(os.getenv("BRT_EXT", "0"))   # مطفي (15-11: خرّب الباك تست 32→16 صفقة، +0.10R→-0.06R). فلتر الملاحقة: أقصى بعد عن EMA21 على H1 بوحدات ATR H1 (0 = بدون فلتر)
 
 
 def brt_extended(h1, price, t, mx=None):
@@ -2282,7 +2282,7 @@ def run_scalp_bt(cid):
             if len(h4) >= 60:
                 sigs.append(("trend", trend_eval(w, h1, o, [trend(h4)]), 16))
                 sigs.append(("brt", brt_eval(w, h1, o, [trend(h4)]), 16))
-                sigs.append(("brt_x", brt_eval(w, h1, o, [trend(h4)], ext=0), 16))
+                sigs.append(("brt_x", brt_eval(w, h1, o, [trend(h4)], ext=1.5), 16))
                 sigs.append(("ict", ict_eval(w, h1, o, [trend(h4)]), 16))
                 sigs.append(("ict_x", ict_eval(w, h1, o, [trend(h4)], disc=0.0), 16))
             if len(h4) >= 60 and trend(h4) == 0:
@@ -2320,8 +2320,8 @@ def run_scalp_bt(cid):
                  ("pin15", "ابتلاع أو Pin Bar، EMA 1.5", days15), ("loose", "الأخف (Pin Bar، EMA 2.0)", days15),
                  ("m5", "M5 ابتلاع (اتجاه M15)", days5), ("m5p", "M5 ابتلاع أو Pin Bar", days5),
                  ("trend", "📈 مع الترند (رجوع EMA21)", days15),
-                 ("brt", f"🔁 اختراق (الحالي: فلتر ملاحقة {BRT_EXT}×ATR)", days15),
-                 ("brt_x", "🔁 اختراق القديم (بدون فلتر ملاحقة)", days15),
+                 ("brt", "🔁 اختراق وإعادة اختبار (الحالي)", days15),
+                 ("brt_x", "🔁 اختراق + فلتر ملاحقة 1.5×ATR", days15),
                  ("ict", "🎯 ICT (الحالي: بمنطقة خصم/غلاء)", days15),
                  ("ict_x", "🎯 ICT بدون شرط الخصم/الغلاء", days15),
                  ("range", "🔄 النطاق الحالي", days15), ("range_l", "🔄 النطاق الأخف", days15)]
