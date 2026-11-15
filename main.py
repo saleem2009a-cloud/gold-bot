@@ -511,6 +511,62 @@ def time_text(d1, h4, h1):
     return "\n".join(L)
 
 
+# ---------------- تنبيه بداية دورة زمنية جديدة ----------------
+cyc_alert = {"on": os.getenv("CYC_ALERT", "1") == "1", "sent": set(), "init": False}
+
+
+def cycle_windows(d1, h4, h1):
+    """كل نوافذ الدورات المفتوحة هلأ: [(مفتاح فريد، نص التنبيه)]"""
+    out = []
+    today = datetime.now(timezone.utc).date()
+    cyc = cycle(d1, today)
+    for key, lbl, eff in (("lo_date", "القاع", "🟢 تدعم الشراء"), ("hi_date", "القمة", "🔴 تدعم البيع")):
+        base = cyc.get(key)
+        if base is None:
+            continue
+        days = (today - base).days
+        for x in FIB + GANN:
+            if abs(days - x) <= 1:
+                out.append((("D1", lbl, x, str(base)),
+                            f"📅 يومي: دورة {x} يوم من {lbl} ({base:%d/%m}) ← {eff}\n"
+                            f"   النافذة ±يوم، يعني لحد {base + timedelta(days=x + 1):%d/%m}"))
+    for df, name, hrs in ((h4, "H4", 4), (h1, "H1", 1)):
+        c = cycle_tf(df, name)
+        for key, lbl, eff in (("lo", "القاع", "🟢 تدعم الشراء"), ("hi", "القمة", "🔴 تدعم البيع")):
+            v = c.get(key)
+            if not v:
+                continue
+            for x in TF_FIB:
+                if abs(v["k"] - x) <= 1:
+                    end = to_local(pd.Timestamp(v["t"]) + pd.Timedelta(hours=(x + 2) * hrs))
+                    out.append(((name, lbl, x, str(v["t"])),
+                                f"🕓 {name}: دورة {x} شمعة من {lbl} ({to_local(v['t']):%d/%m %H:%M}) ← {eff}\n"
+                                f"   النافذة ±شمعة، تقريباً لحد {end:%H:%M}"))
+    return out
+
+
+def cycle_alerts():
+    d1, h4, h1 = snap.get("d1"), snap.get("h4"), snap.get("h1")
+    if d1 is None or h1 is None or h4 is None:
+        return
+    wins = cycle_windows(d1, h4, h1)
+    if not cyc_alert["init"]:                     # أول تشغيل: النوافذ المفتوحة أصلاً ما منبعتها (ما نعيد بعد كل إعادة تشغيل)
+        cyc_alert["sent"].update(k for k, _ in wins)
+        cyc_alert["init"] = True
+        return
+    new = [(k, t) for k, t in wins if k not in cyc_alert["sent"]]
+    cyc_alert["sent"].update(k for k, _ in new)
+    if len(cyc_alert["sent"]) > 300:
+        cyc_alert["sent"] = {k for k, _ in wins}
+    if not new or not cyc_alert["on"]:
+        return
+    bias = sum(1 if "🟢" in t else -1 for _, t in wins)
+    send("🔁 بلّشت دورة زمنية جديدة\n\n" + "\n".join(t for _, t in new)
+         + "\n\n🧭 كل النوافذ المفتوحة هلأ: " + ("🟢 الوقت يميل للشراء" if bias > 0 else
+                                               ("🔴 الوقت يميل للبيع" if bias < 0 else "⚪ متعادل"))
+         + "\nℹ️ الدورة = احتمال انعكاس، مو إشارة دخول لحالها. (/cyc_off لإيقاف التنبيه)")
+
+
 # ---------------- مفاهيم السيولة (SMC) ----------------
 def sweep(df, d, look=20, bars=2):
     """كسر قاع/قمة وهمي: كسر مستوى سابق ثم إغلاق عكسي"""
@@ -2488,6 +2544,10 @@ def loop():
             except Exception as e:
                 print(f"[cam] error: {e}", flush=True)
             try:
+                cycle_alerts()
+            except Exception as e:
+                print(f"[cyc] error: {e}", flush=True)
+            try:
                 scalp_step()
             except Exception as e:
                 print(f"[scalp] error: {e}", flush=True)
@@ -2637,6 +2697,12 @@ def commands():
                     reply(cid, "🧹 تم تصفير السجل.")
                 elif text.startswith("/stats"):
                     reply(cid, stats_text())
+                elif text.startswith("/cyc_on"):
+                    cyc_alert["on"] = True
+                    reply(cid, "🔁 تنبيه بداية الدورات الزمنية مفعّل (يومي + H4 + H1).")
+                elif text.startswith("/cyc_off"):
+                    cyc_alert["on"] = False
+                    reply(cid, "⏸️ تنبيه الدورات الزمنية متوقف.")
                 elif text.startswith("/range_on"):
                     rng_mode["on"] = True
                     reply(cid, "🔄 وضع تداول النطاق مفعّل (بيشتغل بس لما H4 محايد).")
@@ -2786,7 +2852,7 @@ def commands():
                                f"آخر فحص: {status['msg']} (قبل {int(time.time() - status.get('t', time.time()))} ثانية)"
                                f"{' ⚠️ الفحص التلقائي واقف!' if time.time() - status.get('t', time.time()) > 600 else ''}{t}")
                 elif text.startswith("/start"):
-                    reply(cid, "أهلاً! الأوامر:\n/tawsiya تحليل كامل\n/price السعر\n/levels قمة ونص وقاع شمعة امبارح\n/time التحليل الزمني (دورات D1/H4/H1 + أوقات الحركة)\n/timef_on /timef_off فلتر الوقت الميت\n/cam مستويات كامارلا لليوم\n/cam_on /cam_off تنبيهات كامارلا\n/ai قراءة السوق بالذكاء الاصطناعي مع الأخبار\n/backtest 180 اختبار الاستراتيجية على التاريخ\n/calib 4193.5 معايرة السعر على منصتك\n/auto_on /auto_off\n/scalp_on /scalp_off\n/ict وضع السوق حسب ICT (سيولة + Kill Zone)\n/ict_on /ict_off صفقات ICT 🎯\n/fast_on /fast_off التوصيات السريعة ⚡\n/scalpbt مقارنة الشروط الحالية مع الأخف\n/loose_on /loose_off شروط أخف = صفقات أكتر\n/range_on /range_off تداول النطاق\n/news الأخبار القوية هذا الأسبوع\n/news_on /news_off فلتر الأخبار (مع تقرير بعد كل خبر)\n/trail_on /trail_off وقف متحرك بعد الهدف 1\n/week ملخص الأسبوع لحد هلأ (التقرير الكامل بيوصل كل أحد 20:00)\n/allday_on /allday_off توصيات على مدار الساعة\n/stats نتائج التوصيات\n/stats_reset تصفير السجل\n/status")
+                    reply(cid, "أهلاً! الأوامر:\n/tawsiya تحليل كامل\n/price السعر\n/levels قمة ونص وقاع شمعة امبارح\n/time التحليل الزمني (دورات D1/H4/H1 + أوقات الحركة)\n/cyc_on /cyc_off تنبيه بداية كل دورة زمنية جديدة\n/timef_on /timef_off فلتر الوقت الميت\n/cam مستويات كامارلا لليوم\n/cam_on /cam_off تنبيهات كامارلا\n/ai قراءة السوق بالذكاء الاصطناعي مع الأخبار\n/backtest 180 اختبار الاستراتيجية على التاريخ\n/calib 4193.5 معايرة السعر على منصتك\n/auto_on /auto_off\n/scalp_on /scalp_off\n/ict وضع السوق حسب ICT (سيولة + Kill Zone)\n/ict_on /ict_off صفقات ICT 🎯\n/fast_on /fast_off التوصيات السريعة ⚡\n/scalpbt مقارنة الشروط الحالية مع الأخف\n/loose_on /loose_off شروط أخف = صفقات أكتر\n/range_on /range_off تداول النطاق\n/news الأخبار القوية هذا الأسبوع\n/news_on /news_off فلتر الأخبار (مع تقرير بعد كل خبر)\n/trail_on /trail_off وقف متحرك بعد الهدف 1\n/week ملخص الأسبوع لحد هلأ (التقرير الكامل بيوصل كل أحد 20:00)\n/allday_on /allday_off توصيات على مدار الساعة\n/stats نتائج التوصيات\n/stats_reset تصفير السجل\n/status")
         except Exception as e:
             status["msg"] = f"cmd error: {e}"
             print(f"[commands] error: {e}", flush=True)
