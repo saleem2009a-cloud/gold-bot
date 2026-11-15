@@ -567,6 +567,43 @@ def cycle_alerts():
          + "\nℹ️ الدورة = احتمال انعكاس، مو إشارة دخول لحالها. (/cyc_off لإيقاف التنبيه)")
 
 
+kz_alert = {"on": os.getenv("KZ_ALERT", "1") == "1", "cur": "init"}
+
+
+def kz_now(ts=None):
+    ny = _ny(ts if ts is not None else pd.Timestamp.now(tz="UTC"))
+    m = ny.hour * 60 + ny.minute
+    return next(((n, a, b) for n, a, b in TIME_KZ if a <= m < b), None)
+
+
+def kz_alerts():
+    """تنبيه لما يبلّش كيل زون لندن أو نيويورك"""
+    k = kz_now()
+    name = k[0] if k else None
+    prev, kz_alert["cur"] = kz_alert["cur"], name
+    if prev == "init" or not name or name == prev or not kz_alert["on"] or market_closed():
+        return
+    now = pd.Timestamp.now(tz="UTC")
+    end = to_local(now + pd.Timedelta(minutes=k[2] - (_ny(now).hour * 60 + _ny(now).minute)))
+    L = [f"⏰ بلّش {name} — وقت حركة قوية", f"🕐 لحد تقريباً {end:%H:%M} بتوقيتك"]
+    try:
+        d1, h4, h1 = snap.get("d1"), snap.get("h4"), snap.get("h1")
+        if h1 is not None:
+            wins = cycle_windows(d1, h4, h1)
+            bias = sum(1 if "🟢" in t else -1 for _, t in wins)
+            L.append("🧭 الدورات الزمنية: " + ("🟢 تميل للشراء" if bias > 0 else
+                                               ("🔴 تميل للبيع" if bias < 0 else "⚪ لا ميل واضح")))
+            tr = {1: "صاعد 🟢", -1: "هابط 🔴", 0: "محايد ⚪"}
+            L.append(f"📊 الاتجاه: D1 {tr[trend(d1)]} | H4 {tr[trend(h4)]} | H1 {tr[trend(h1)]}")
+    except Exception as e:
+        print(f"[kz] ctx error: {e}", flush=True)
+    nb = news_block()
+    if nb:
+        L.append(f"⚠️ في خبر قوي قريب: {nb['title']}")
+    L.append("ℹ️ هاد تنبيه توقيت بس، مو توصية. (/kz_off لإيقافه)")
+    send("\n".join(L))
+
+
 # ---------------- مفاهيم السيولة (SMC) ----------------
 def sweep(df, d, look=20, bars=2):
     """كسر قاع/قمة وهمي: كسر مستوى سابق ثم إغلاق عكسي"""
@@ -2544,6 +2581,10 @@ def loop():
             except Exception as e:
                 print(f"[cam] error: {e}", flush=True)
             try:
+                kz_alerts()
+            except Exception as e:
+                print(f"[kz] error: {e}", flush=True)
+            try:
                 cycle_alerts()
             except Exception as e:
                 print(f"[cyc] error: {e}", flush=True)
@@ -2697,6 +2738,12 @@ def commands():
                     reply(cid, "🧹 تم تصفير السجل.")
                 elif text.startswith("/stats"):
                     reply(cid, stats_text())
+                elif text.startswith("/kz_on"):
+                    kz_alert["on"] = True
+                    reply(cid, "⏰ تنبيه بداية الكيل زون (لندن + نيويورك) مفعّل.")
+                elif text.startswith("/kz_off"):
+                    kz_alert["on"] = False
+                    reply(cid, "⏸️ تنبيه الكيل زون متوقف.")
                 elif text.startswith("/cyc_on"):
                     cyc_alert["on"] = True
                     reply(cid, "🔁 تنبيه بداية الدورات الزمنية مفعّل (يومي + H4 + H1).")
@@ -2852,7 +2899,7 @@ def commands():
                                f"آخر فحص: {status['msg']} (قبل {int(time.time() - status.get('t', time.time()))} ثانية)"
                                f"{' ⚠️ الفحص التلقائي واقف!' if time.time() - status.get('t', time.time()) > 600 else ''}{t}")
                 elif text.startswith("/start"):
-                    reply(cid, "أهلاً! الأوامر:\n/tawsiya تحليل كامل\n/price السعر\n/levels قمة ونص وقاع شمعة امبارح\n/time التحليل الزمني (دورات D1/H4/H1 + أوقات الحركة)\n/cyc_on /cyc_off تنبيه بداية كل دورة زمنية جديدة\n/timef_on /timef_off فلتر الوقت الميت\n/cam مستويات كامارلا لليوم\n/cam_on /cam_off تنبيهات كامارلا\n/ai قراءة السوق بالذكاء الاصطناعي مع الأخبار\n/backtest 180 اختبار الاستراتيجية على التاريخ\n/calib 4193.5 معايرة السعر على منصتك\n/auto_on /auto_off\n/scalp_on /scalp_off\n/ict وضع السوق حسب ICT (سيولة + Kill Zone)\n/ict_on /ict_off صفقات ICT 🎯\n/fast_on /fast_off التوصيات السريعة ⚡\n/scalpbt مقارنة الشروط الحالية مع الأخف\n/loose_on /loose_off شروط أخف = صفقات أكتر\n/range_on /range_off تداول النطاق\n/news الأخبار القوية هذا الأسبوع\n/news_on /news_off فلتر الأخبار (مع تقرير بعد كل خبر)\n/trail_on /trail_off وقف متحرك بعد الهدف 1\n/week ملخص الأسبوع لحد هلأ (التقرير الكامل بيوصل كل أحد 20:00)\n/allday_on /allday_off توصيات على مدار الساعة\n/stats نتائج التوصيات\n/stats_reset تصفير السجل\n/status")
+                    reply(cid, "أهلاً! الأوامر:\n/tawsiya تحليل كامل\n/price السعر\n/levels قمة ونص وقاع شمعة امبارح\n/time التحليل الزمني (دورات D1/H4/H1 + أوقات الحركة)\n/cyc_on /cyc_off تنبيه بداية كل دورة زمنية جديدة\n/kz_on /kz_off تنبيه بداية كيل زون لندن ونيويورك\n/timef_on /timef_off فلتر الوقت الميت\n/cam مستويات كامارلا لليوم\n/cam_on /cam_off تنبيهات كامارلا\n/ai قراءة السوق بالذكاء الاصطناعي مع الأخبار\n/backtest 180 اختبار الاستراتيجية على التاريخ\n/calib 4193.5 معايرة السعر على منصتك\n/auto_on /auto_off\n/scalp_on /scalp_off\n/ict وضع السوق حسب ICT (سيولة + Kill Zone)\n/ict_on /ict_off صفقات ICT 🎯\n/fast_on /fast_off التوصيات السريعة ⚡\n/scalpbt مقارنة الشروط الحالية مع الأخف\n/loose_on /loose_off شروط أخف = صفقات أكتر\n/range_on /range_off تداول النطاق\n/news الأخبار القوية هذا الأسبوع\n/news_on /news_off فلتر الأخبار (مع تقرير بعد كل خبر)\n/trail_on /trail_off وقف متحرك بعد الهدف 1\n/week ملخص الأسبوع لحد هلأ (التقرير الكامل بيوصل كل أحد 20:00)\n/allday_on /allday_off توصيات على مدار الساعة\n/stats نتائج التوصيات\n/stats_reset تصفير السجل\n/status")
         except Exception as e:
             status["msg"] = f"cmd error: {e}"
             print(f"[commands] error: {e}", flush=True)
